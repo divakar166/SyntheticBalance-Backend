@@ -1,5 +1,6 @@
+from typing import Any, Dict
+
 import pandas as pd
-from typing import Dict, List, Optional
 
 class SchemaDetector:
     """Auto-detect schema from CSV (numeric vs categorical, cardinality, types)"""
@@ -23,72 +24,111 @@ class SchemaDetector:
                 'target': {'type': 'categorical', 'cardinality': 2, 'class_dist': {0: 9500, 1: 500}}
             }
         """
-        schema = {'features': {}, 'target': None}
-        
-        cols = df.columns.tolist()
-        if target_col:
-            cols.remove(target_col)
-        
-        for col in cols:
-            try:
-                # Try numeric conversion
-                numeric_vals = pd.to_numeric(df[col], errors='coerce')
-                numeric_ratio = numeric_vals.notna().sum() / len(df)
-                
-                if numeric_ratio >= SchemaDetector.NUMERIC_THRESHOLD:
-                    schema['features'][col] = {
-                        'type': 'numeric',
-                        'min': float(df[col].min()),
-                        'max': float(df[col].max()),
-                        'mean': float(df[col].mean()),
-                        'std': float(df[col].std()),
-                        'missing_pct': float(df[col].isna().sum() / len(df) * 100)
-                    }
-                else:
-                    raise ValueError("Not numeric")
-            except (ValueError, TypeError):
-                # Treat as categorical
-                cardinality = df[col].nunique()
-                top_values = df[col].value_counts().head(5)
-                
-                schema['features'][col] = {
-                    'type': 'categorical',
-                    'cardinality': int(cardinality),
-                    'top_values': top_values.index.tolist(),
-                    'missing_pct': float(df[col].isna().sum() / len(df) * 100)
-                }
-        
-        if target_col:
-            target_vals = df[target_col]
-            cardinality = target_vals.nunique()
+        schema = {'features': {}, 'target': None, 'skipped_features': []}
 
-            if cardinality <= SchemaDetector.CATEGORICAL_THRESHOLD:
+        cols = df.columns.tolist()
+        if target_col and target_col in cols:
+            cols.remove(target_col)
+
+        for col in cols:
+            series = df[col]
+            profile = SchemaDetector._profile_feature(series)
+            if profile is None:
+                schema['skipped_features'].append(col)
+                continue
+            schema['features'][col] = profile
+
+        if target_col and target_col in df.columns:
+            target_vals = df[target_col]
+            non_null = target_vals.dropna()
+            if not non_null.empty:
+                class_distribution = {
+                    str(SchemaDetector._serialize_scalar(label)): int(count)
+                    for label, count in non_null.value_counts().items()
+                }
                 schema['target'] = {
                     'name': target_col,
                     'type': 'categorical',
-                    'cardinality': int(cardinality),
-                    'class_distribution': target_vals.value_counts().to_dict()
+                    'cardinality': int(non_null.nunique()),
+                    'missing_count': int(target_vals.isna().sum()),
+                    'missing_pct': float(target_vals.isna().mean() * 100),
+                    'class_distribution': class_distribution
                 }
-            else:
-                # Try numeric fallback if possible
-                numeric_vals = pd.to_numeric(target_vals, errors='coerce')
-                if numeric_vals.notna().sum() / len(target_vals) >= SchemaDetector.NUMERIC_THRESHOLD:
-                    schema['target'] = {
-                        'name': target_col,
-                        'type': 'numeric',
-                        'min': float(numeric_vals.min()),
-                        'max': float(numeric_vals.max())
-                    }
-                else:
-                    # fallback categorical anyway
-                    schema['target'] = {
-                        'name': target_col,
-                        'type': 'categorical',
-                        'cardinality': int(cardinality),
-                        'class_distribution': target_vals.value_counts().to_dict()
-                    }
-        
+
         return schema
+
+    @staticmethod
+    def _profile_feature(series: pd.Series) -> Dict[str, Any] | None:
+        total_count = len(series)
+        missing_count = int(series.isna().sum())
+        missing_pct = float((missing_count / total_count) * 100) if total_count else 0.0
+        non_null = series.dropna()
+
+        if non_null.empty:
+            return None
+
+        coerced_numeric = pd.to_numeric(non_null, errors='coerce')
+        numeric_ratio = float(coerced_numeric.notna().mean())
+        unique_count = int(non_null.nunique())
+        is_constant = unique_count <= 1
+
+        base_profile: Dict[str, Any] = {
+            'missing_count': missing_count,
+            'missing_pct': missing_pct,
+            'unique_values': unique_count,
+            'is_constant': is_constant,
+        }
+
+        if numeric_ratio >= SchemaDetector.NUMERIC_THRESHOLD:
+            q1 = coerced_numeric.quantile(0.25)
+            q3 = coerced_numeric.quantile(0.75)
+            return {
+                **base_profile,
+                'type': 'numeric',
+                'min': SchemaDetector._safe_float(coerced_numeric.min()),
+                'max': SchemaDetector._safe_float(coerced_numeric.max()),
+                'mean': SchemaDetector._safe_float(coerced_numeric.mean()),
+                'std': SchemaDetector._safe_float(coerced_numeric.std()),
+                'median': SchemaDetector._safe_float(coerced_numeric.median()),
+                'q1': SchemaDetector._safe_float(q1),
+                'q3': SchemaDetector._safe_float(q3),
+                'iqr': SchemaDetector._safe_float(q3 - q1),
+                'skewness': SchemaDetector._safe_float(coerced_numeric.skew()),
+                'kurtosis': SchemaDetector._safe_float(coerced_numeric.kurt()),
+            }
+
+        value_counts = non_null.value_counts().head(5)
+        top_value_stats = []
+        for value, count in value_counts.items():
+            top_value_stats.append(
+                {
+                    'value': str(SchemaDetector._serialize_scalar(value)),
+                    'count': int(count),
+                    'pct': float((count / len(non_null)) * 100),
+                }
+            )
+
+        return {
+            **base_profile,
+            'type': 'categorical',
+            'cardinality': unique_count,
+            'top_values': [item['value'] for item in top_value_stats],
+            'top_value_stats': top_value_stats,
+            'example_values': [str(SchemaDetector._serialize_scalar(value)) for value in non_null.head(3).tolist()],
+            'most_common_freq': int(value_counts.iloc[0]) if not value_counts.empty else 0,
+        }
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        if pd.isna(value):
+            return None
+        return float(value)
+
+    @staticmethod
+    def _serialize_scalar(value: Any) -> Any:
+        if hasattr(value, 'item'):
+            return value.item()
+        return value
 
 
 class Preprocessor:
