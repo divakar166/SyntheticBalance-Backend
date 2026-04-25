@@ -5,9 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.40.59",
     "ctgan>=0.11.1",
     "fastapi>=0.136.0",
     "matplotlib>=3.10.8",
+    "minio>=7.2.20",
+    "modal>=1.4.2",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "plotly>=6.7.0",
@@ -18,6 +21,7 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
+    "supabase>=2.18.1",
     "uvicorn[standard]>=0.45.0",
     "xgboost>=3.2.0",
 ]

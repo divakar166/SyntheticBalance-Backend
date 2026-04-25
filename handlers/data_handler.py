@@ -2,6 +2,20 @@ from typing import Any, Dict
 
 import pandas as pd
 
+
+def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+
+    for col in normalized.columns:
+        series = normalized[col]
+        if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
+            normalized[col] = series.map(
+                lambda value: value.strip() if isinstance(value, str) else value
+            ).replace("", pd.NA)
+
+    return normalized
+
+
 class SchemaDetector:
     """Auto-detect schema from CSV (numeric vs categorical, cardinality, types)"""
     
@@ -24,6 +38,7 @@ class SchemaDetector:
                 'target': {'type': 'categorical', 'cardinality': 2, 'class_dist': {0: 9500, 1: 500}}
             }
         """
+        df = normalize_dataframe(df)
         schema = {'features': {}, 'target': None, 'skipped_features': []}
 
         cols = df.columns.tolist()
@@ -59,6 +74,7 @@ class SchemaDetector:
 
     @staticmethod
     def _profile_feature(series: pd.Series) -> Dict[str, Any] | None:
+        series = normalize_dataframe(pd.DataFrame({"value": series}))["value"]
         total_count = len(series)
         missing_count = int(series.isna().sum())
         missing_pct = float((missing_count / total_count) * 100) if total_count else 0.0
@@ -77,6 +93,21 @@ class SchemaDetector:
             'missing_pct': missing_pct,
             'unique_values': unique_count,
             'is_constant': is_constant,
+            'min': None,
+            'max': None,
+            'mean': None,
+            'std': None,
+            'median': None,
+            'q1': None,
+            'q3': None,
+            'iqr': None,
+            'skewness': None,
+            'kurtosis': None,
+            'cardinality': None,
+            'top_values': [],
+            'top_value_stats': [],
+            'example_values': [],
+            'most_common_freq': None,
         }
 
         if numeric_ratio >= SchemaDetector.NUMERIC_THRESHOLD:
