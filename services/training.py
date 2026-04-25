@@ -4,11 +4,12 @@ import logging
 from pathlib import Path
 import uuid
 from datetime import datetime, timezone
+from settings import get_settings
 
 from fastapi import HTTPException
 
 from services.state import get_storage_backend
-from services.utils import build_batch_history, build_loss_history, utc_now_iso
+from services.utils import build_loss_history, utc_now_iso
 
 logger = logging.getLogger(__name__)
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
@@ -26,13 +27,10 @@ def create_training_job(dataset_id: str, epochs: int) -> dict:
     job = {
         "job_id": str(uuid.uuid4()),
         "dataset_id": dataset_id,
-        "status": "running",
+        "status": "queued",
         "current_epoch": 0,
         "total_epochs": epochs,
-        "current_batch": 0,
-        "total_batches": 0,
         "loss_history": [],
-        "batch_history": [],
         "training_time_seconds": None,
         "final_loss": None,
         "error": None,
@@ -45,7 +43,72 @@ def create_training_job(dataset_id: str, epochs: int) -> dict:
     return get_storage_backend().save_training_job(job)
 
 
+def _use_modal() -> bool:
+    settings = get_settings()
+    return settings.use_modal
+
+
 def run_training_job(job_id: str):
+    """
+    Called by FastAPI's BackgroundTasks.  Chooses Modal or local execution.
+    """
+    if _use_modal():
+        _dispatch_to_modal(job_id)
+    else:
+        _run_local(job_id)
+
+
+def _dispatch_to_modal(job_id: str):
+    backend = get_storage_backend()
+    job = backend.get_training_job(job_id)
+    if not job:
+        logger.error("Job %s not found - cannot dispatch to Modal", job_id)
+        return
+
+    try:
+        import modal
+
+        train_ctgan_modal = modal.Function.from_name(
+            "synthetic-data-ctgan",
+            "train_ctgan_modal",
+        )
+
+        dataset_id = job["dataset_id"]
+        epochs     = job["total_epochs"]
+
+        logger.info(
+            "Dispatching job %s (dataset=%s, epochs=%d) to Modal",
+            job_id, dataset_id, epochs,
+        )
+
+        backend.update_training_job(job_id, {
+            "status": "running",
+            "updated_at": utc_now_iso(),
+        })
+
+        call = train_ctgan_modal.spawn(
+            dataset_id=dataset_id,
+            job_id=job_id,
+            epochs=epochs,
+        )
+
+        backend.update_training_job(job_id, {
+            "modal_call_id": call.object_id,
+            "updated_at": utc_now_iso(),
+        })
+ 
+        logger.info("Modal call spawned: %s", call.object_id)
+
+    except Exception as exc:
+        logger.exception("Failed to dispatch job %s to Modal", job_id)
+        backend.update_training_job(job_id, {
+            "status": "failed",
+            "error": f"Modal dispatch error: {exc}",
+            "updated_at": utc_now_iso(),
+        })
+
+
+def _run_local(job_id: str):
     from generators.ctgan import CTGANWrapper
 
     backend = get_storage_backend()
@@ -78,81 +141,73 @@ def run_training_job(job_id: str):
     )
 
     def update_progress(current_epoch: int, total_epochs: int, metrics: dict):
-        updated_at = utc_now_iso()
+        if metrics.get("stage", "epoch") == "batch":
+            return
+        
+        updated_at  = utc_now_iso()
         current_job = backend.get_training_job(job_id) or job
-        updates = {
+        loss_history = list(current_job.get("loss_history", []))
+        loss_history.append({
+            "epoch": current_epoch,
+            "generator_loss": float(metrics["generator_loss"]),
+            "discriminator_loss": float(metrics["discriminator_loss"]),
+        })
+
+        backend.update_training_job(job_id, {
             "current_epoch": current_epoch,
             "total_epochs": total_epochs,
-            "updated_at": updated_at,
+            "loss_history": loss_history,
+            "final_loss": float(metrics["generator_loss"]),
             "last_heartbeat": updated_at,
-        }
-        if metrics.get("current_batch") is not None:
-            updates["current_batch"] = int(metrics["current_batch"])
-        if metrics.get("total_batches") is not None:
-            updates["total_batches"] = int(metrics["total_batches"])
-
-        if metrics.get("stage", "epoch") == "batch":
-            batch_history = list(current_job.get("batch_history", []))
-            batch_history.append(
-                {
-                    "epoch": current_epoch,
-                    "batch": int(metrics.get("current_batch", 0)),
-                    "total_batches": int(metrics.get("total_batches", 0)),
-                    "generator_loss": metrics.get("generator_loss"),
-                    "discriminator_loss": metrics.get("discriminator_loss"),
-                    "updated_at": updated_at,
-                }
-            )
-            updates["batch_history"] = batch_history[-250:]
-        else:
-            loss_history = list(current_job.get("loss_history", []))
-            loss_history.append(
-                {
-                    "epoch": current_epoch,
-                    "generator_loss": float(metrics["generator_loss"]),
-                    "discriminator_loss": float(metrics["discriminator_loss"]),
-                }
-            )
-            updates["loss_history"] = loss_history
-            updates["final_loss"] = float(metrics["generator_loss"])
-
-        backend.update_training_job(job_id, updates)
+            "updated_at": updated_at,
+        })
+ 
+        logger.info(
+            "Job %s | epoch %d/%d | G=%.4f D=%.4f",
+            job_id, current_epoch, total_epochs,
+            metrics["generator_loss"], metrics["discriminator_loss"],
+        )
 
     try:
         ctgan.train(df, target_col=target_col, progress_callback=update_progress)
+ 
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         local_model_path = MODELS_DIR / f"ctgan_{dataset_id}.pkl"
         ctgan.save(local_model_path)
         model_record = backend.save_model(
             dataset_id,
             local_model_path,
-            metadata={"trained_at": utc_now_iso(), "job_id": job_id},
+            metadata={"trained_at": utc_now_iso(), "job_id": job_id, "source": "local"},
         )
-        if local_model_path.exists():
-            local_model_path.unlink()
+        local_model_path.unlink(missing_ok=True)
 
         current_job = backend.get_training_job(job_id) or job
-        updates = {
+        final_loss  = None
+        if current_job.get("loss_history"):
+            final_loss = float(current_job["loss_history"][-1]["generator_loss"])
+ 
+        backend.update_training_job(job_id, {
             "status": "completed",
             "model_id": dataset_id,
             "model_path": model_record["object_key"],
             "training_time_seconds": float(ctgan.training_time_seconds),
+            "final_loss": final_loss,
             "updated_at": utc_now_iso(),
-        }
-        if current_job.get("loss_history"):
-            updates["final_loss"] = float(current_job["loss_history"][-1]["generator_loss"])
-        backend.update_training_job(job_id, updates)
+        })
+ 
+        logger.info(
+            "Job %s completed in %.1fs | model -> %s",
+            job_id, ctgan.training_time_seconds, model_record["object_key"],
+        )
+
     except Exception as exc:
         logger.exception("CTGAN training failed for dataset %s", dataset_id)
-        backend.update_training_job(
-            job_id,
-            {
-                "status": "failed",
-                "error": str(exc),
-                "training_time_seconds": float((datetime.now(timezone.utc) - started_at).total_seconds()),
-                "updated_at": utc_now_iso(),
-            },
-        )
+        backend.update_training_job(job_id, {
+            "status": "failed",
+            "error": str(exc),
+            "training_time_seconds": float((datetime.now(timezone.utc) - started_at).total_seconds()),
+            "updated_at": utc_now_iso(),
+        })
 
 
 def training_status_payload(job: dict) -> dict:
@@ -162,28 +217,11 @@ def training_status_payload(job: dict) -> dict:
         "status": job["status"],
         "current_epoch": job["current_epoch"],
         "total_epochs": job["total_epochs"],
-        "current_batch": job["current_batch"],
-        "total_batches": job["total_batches"],
         "loss_history": build_loss_history(job.get("loss_history", [])),
-        "batch_history": build_batch_history(job.get("batch_history", [])),
         "training_time_seconds": job.get("training_time_seconds"),
         "final_loss": job.get("final_loss"),
         "error": job.get("error"),
         "model_id": job.get("model_id"),
         "last_heartbeat": job.get("last_heartbeat"),
-    }
-
-
-def training_batch_history_payload(job: dict) -> dict:
-    return {
-        "job_id": job["job_id"],
-        "dataset_id": job["dataset_id"],
-        "status": job["status"],
-        "current_epoch": job["current_epoch"],
-        "total_epochs": job["total_epochs"],
-        "current_batch": job["current_batch"],
-        "total_batches": job["total_batches"],
-        "batch_history": build_batch_history(job.get("batch_history", [])),
-        "last_heartbeat": job.get("last_heartbeat"),
-        "error": job.get("error"),
+        "modal_call_id": job.get("modal_call_id"),
     }

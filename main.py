@@ -13,7 +13,6 @@ from services.training import (
     find_training_job,
     run_training_job,
     storage_operation_error,
-    training_batch_history_payload,
     training_status_payload,
 )
 from services.uploads import (
@@ -128,19 +127,6 @@ async def get_train_status(job_id: str):
     return training_status_payload(job)
 
 
-@app.get("/api/train-batch-history/{job_id}")
-async def get_train_batch_history(job_id: str):
-    try:
-        job = find_training_job(job_id)
-    except Exception as exc:
-        raise storage_operation_error(exc) from exc
-
-    if not job:
-        raise HTTPException(status_code=404, detail=f"Training job or dataset '{job_id}' not found.")
-
-    return training_batch_history_payload(job)
-
-
 @app.post("/api/generate")
 async def generate_synthetic(dataset_id: str, n_samples: int = 5000):
     from generators.ctgan import CTGANWrapper
@@ -236,13 +222,6 @@ async def evaluate(dataset_id: str, synthetic_id: str):
             ),
         },
     }
-
-
-# Compatibility exports used by tests and older imports.
-_create_training_job = create_training_job
-_find_training_job = find_training_job
-_run_training_job = run_training_job
-
 
 if __name__ == "__main__":
     import uvicorn

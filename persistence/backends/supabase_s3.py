@@ -14,6 +14,15 @@ from settings import get_settings
 from .base import PersistenceBackend
 
 
+def _split_bucket_prefix(value: str) -> tuple[str, str]:
+    if "/" in value:
+        bucket, _, rest = value.partition("/")
+        prefix = rest.rstrip("/") + "/"
+    else:
+        bucket, prefix = value, ""
+    return bucket, prefix
+
+
 class SupabaseS3Backend(PersistenceBackend):
     def __init__(self):
         settings = get_settings()
@@ -24,13 +33,27 @@ class SupabaseS3Backend(PersistenceBackend):
         self.aws_secret_access_key = settings.aws_secret_access_key
         self.aws_session_token = settings.aws_session_token
         self.aws_s3_endpoint_url = settings.aws_s3_endpoint_url
-        self.dataset_bucket = settings.aws_s3_dataset_bucket
-        self.model_bucket = settings.aws_s3_model_bucket
-        self.datasets_table = settings.supabase_datasets_table
+
+        raw_dataset = settings.aws_s3_dataset_bucket or ""
+        raw_model   = settings.aws_s3_model_bucket   or ""
+        self.dataset_bucket, self.dataset_prefix = _split_bucket_prefix(raw_dataset)
+        self.model_bucket,   self.model_prefix   = _split_bucket_prefix(raw_model)
+
+        self._single_bucket = (self.dataset_bucket == self.model_bucket)
+
+        self.datasets_table      = settings.supabase_datasets_table
         self.training_jobs_table = settings.supabase_training_jobs_table
-        self.models_table = settings.supabase_models_table
+        self.models_table        = settings.supabase_models_table
         self._supabase = None
         self._s3 = None
+
+    def _dataset_key(self, relative_key: str) -> str:
+        """Prepend the dataset folder prefix to a relative object key."""
+        return f"{self.dataset_prefix}{relative_key}"
+
+    def _model_key(self, relative_key: str) -> str:
+        """Prepend the model folder prefix to a relative object key."""
+        return f"{self.model_prefix}{relative_key}"
 
     def _require_config(self):
         missing = [
@@ -54,13 +77,12 @@ class SupabaseS3Backend(PersistenceBackend):
             f"{service} storage operation failed: {exc}. "
             f"Check your {service} connection settings and service availability."
         )
-
+    
     @property
     def supabase(self):
         if self._supabase is None:
             self._require_config()
             from supabase import create_client
-
             self._supabase = create_client(self.supabase_url, self.supabase_key)
         return self._supabase
 
@@ -76,7 +98,8 @@ class SupabaseS3Backend(PersistenceBackend):
             )
             self._s3 = session.client("s3", endpoint_url=self.aws_s3_endpoint_url or None)
             self._ensure_bucket(self.dataset_bucket)
-            self._ensure_bucket(self.model_bucket)
+            if not self._single_bucket:
+                self._ensure_bucket(self.model_bucket)
         return self._s3
 
     def _ensure_bucket(self, bucket_name: str):
@@ -86,7 +109,6 @@ class SupabaseS3Backend(PersistenceBackend):
             code = exc.response.get("Error", {}).get("Code", "")
             if code not in {"404", "NoSuchBucket"}:
                 raise self._format_storage_error("AWS S3", exc) from exc
-
             params = {"Bucket": bucket_name}
             if self.aws_region and self.aws_region != "us-east-1":
                 params["CreateBucketConfiguration"] = {"LocationConstraint": self.aws_region}
@@ -99,7 +121,9 @@ class SupabaseS3Backend(PersistenceBackend):
 
     def _upload_bytes(self, bucket: str, object_key: str, content: bytes, content_type: str):
         try:
-            self.s3.put_object(Bucket=bucket, Key=object_key, Body=content, ContentType=content_type)
+            self.s3.put_object(
+                Bucket=bucket, Key=object_key, Body=content, ContentType=content_type
+            )
         except Exception as exc:
             raise self._format_storage_error("AWS S3", exc) from exc
 
@@ -111,16 +135,16 @@ class SupabaseS3Backend(PersistenceBackend):
             raise self._format_storage_error("AWS S3", exc) from exc
 
     def _serialize_record(self, record: dict) -> dict:
-        serialized = {}
-        for key, value in record.items():
-            serialized[key] = value
-        return serialized
+        return dict(record)
 
     def save_dataset(self, dataset_id: str, df: pd.DataFrame, schema: dict, metadata: dict) -> dict:
         dataset_type = metadata.get("dataset_type", "real")
-        object_key = f"{dataset_type}/{dataset_id}.csv"
+        relative_key = f"{dataset_type}/{dataset_id}.csv"
+        object_key   = self._dataset_key(relative_key)
+
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         self._upload_bytes(self.dataset_bucket, object_key, csv_bytes, "text/csv")
+
         record = {
             "id": dataset_id,
             "filename": metadata.get("filename"),
@@ -143,7 +167,11 @@ class SupabaseS3Backend(PersistenceBackend):
     def get_dataset(self, dataset_id: str) -> dict | None:
         try:
             response = (
-                self.supabase.table(self.datasets_table).select("*").eq("id", dataset_id).limit(1).execute()
+                self.supabase.table(self.datasets_table)
+                .select("*")
+                .eq("id", dataset_id)
+                .limit(1)
+                .execute()
             )
         except Exception as exc:
             raise self._format_storage_error("Supabase", exc) from exc
@@ -171,7 +199,11 @@ class SupabaseS3Backend(PersistenceBackend):
     def get_training_job(self, job_or_dataset_id: str) -> dict | None:
         try:
             direct = (
-                self.supabase.table(self.training_jobs_table).select("*").eq("job_id", job_or_dataset_id).limit(1).execute()
+                self.supabase.table(self.training_jobs_table)
+                .select("*")
+                .eq("job_id", job_or_dataset_id)
+                .limit(1)
+                .execute()
             )
         except Exception as exc:
             raise self._format_storage_error("Supabase", exc) from exc
@@ -194,7 +226,9 @@ class SupabaseS3Backend(PersistenceBackend):
 
     def save_model(self, dataset_id: str, local_model_path: str | Path, metadata: dict | None = None) -> dict:
         local_model_path = Path(local_model_path)
-        object_key = f"ctgan/{dataset_id}.pkl"
+        relative_key = f"ctgan/{dataset_id}.pkl"
+        object_key   = self._model_key(relative_key)
+
         self._upload_bytes(
             self.model_bucket,
             object_key,
@@ -217,7 +251,11 @@ class SupabaseS3Backend(PersistenceBackend):
     def get_model(self, dataset_id: str) -> dict | None:
         try:
             response = (
-                self.supabase.table(self.models_table).select("*").eq("dataset_id", dataset_id).limit(1).execute()
+                self.supabase.table(self.models_table)
+                .select("*")
+                .eq("dataset_id", dataset_id)
+                .limit(1)
+                .execute()
             )
         except Exception as exc:
             raise self._format_storage_error("Supabase", exc) from exc
@@ -236,7 +274,10 @@ class SupabaseS3Backend(PersistenceBackend):
         return temp_file, record
 
     def get_health_status(self) -> dict:
-        supabase_status = {"configured": bool(self.supabase_url and self.supabase_key), "reachable": False}
+        supabase_status = {
+            "configured": bool(self.supabase_url and self.supabase_key),
+            "reachable": False,
+        }
         s3_status = {
             "configured": bool(
                 self.aws_region
@@ -247,8 +288,8 @@ class SupabaseS3Backend(PersistenceBackend):
             ),
             "reachable": False,
             "region": self.aws_region,
-            "dataset_bucket": self.dataset_bucket,
-            "model_bucket": self.model_bucket,
+            "dataset_bucket": f"{self.dataset_bucket}/{self.dataset_prefix.rstrip('/')}".rstrip("/"),
+            "model_bucket":   f"{self.model_bucket}/{self.model_prefix.rstrip('/')}".rstrip("/"),
         }
         if supabase_status["configured"]:
             try:
@@ -259,7 +300,6 @@ class SupabaseS3Backend(PersistenceBackend):
         if s3_status["configured"]:
             try:
                 self.s3.head_bucket(Bucket=self.dataset_bucket)
-                self.s3.head_bucket(Bucket=self.model_bucket)
                 s3_status["reachable"] = True
             except Exception as exc:
                 s3_status["error"] = str(exc)

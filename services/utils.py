@@ -72,17 +72,3 @@ def build_loss_history(records: list[dict]) -> list[dict]:
         }
         for record in records
     ]
-
-
-def build_batch_history(records: list[dict]) -> list[dict]:
-    return [
-        {
-            "epoch": int(record["epoch"]),
-            "batch": int(record["batch"]),
-            "total_batches": int(record["total_batches"]),
-            "generator_loss": None if record.get("generator_loss") is None else float(record["generator_loss"]),
-            "discriminator_loss": None if record.get("discriminator_loss") is None else float(record["discriminator_loss"]),
-            "updated_at": record["updated_at"],
-        }
-        for record in records
-    ]

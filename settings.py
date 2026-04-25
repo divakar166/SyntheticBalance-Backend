@@ -22,6 +22,8 @@ class AppSettings(BaseSettings):
     classifier_test_size: float = 0.2
     random_seed: int = 42
 
+    use_modal: bool = True
+
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
     supabase_datasets_table: str = "datasets"
@@ -44,8 +46,7 @@ class AppSettings(BaseSettings):
     aws_s3_model_bucket: str | None = None
 
     def ensure_directories(self):
-        for directory in (self.model_dir):
-            directory.mkdir(parents=True, exist_ok=True)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
