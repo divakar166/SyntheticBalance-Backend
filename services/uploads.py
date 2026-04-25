@@ -98,6 +98,7 @@ def create_dataset_record(
     *,
     dataset_type: str = "real",
     extra_metadata: dict | None = None,
+    storage_backend=None,
 ) -> dict:
     schema = SchemaDetector.detect(df, target_col=target)
     schema["target"]["class_distribution"] = normalized_class_distribution(df[target])
@@ -113,8 +114,9 @@ def create_dataset_record(
     }
     if extra_metadata:
         metadata.update(extra_metadata)
-    get_storage_backend().save_dataset(dataset_id, df, schema, metadata)
-    return {
+    backend = storage_backend or get_storage_backend()
+    saved_record = backend.save_dataset(dataset_id, df, schema, metadata)
+    response = {
         "dataset_id": dataset_id,
         "n_rows": len(df),
         "n_features": len(schema["features"]),
@@ -122,3 +124,6 @@ def create_dataset_record(
         "schema": schema,
         "class_imbalance": class_imbalance,
     }
+    if saved_record.get("object_key"):
+        response["object_key"] = saved_record["object_key"]
+    return response

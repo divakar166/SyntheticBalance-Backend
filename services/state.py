@@ -7,6 +7,7 @@ from persistence import InMemoryBackend, SupabaseMinioBackend, SupabaseS3Backend
 datasets = {}
 models = {}
 training_jobs = {}
+generation_jobs = {}
 
 _storage_backend = None
 
@@ -35,6 +36,6 @@ def get_storage_backend():
     elif has_supabase and has_minio:
         _storage_backend = SupabaseMinioBackend()
     else:
-        _storage_backend = InMemoryBackend(datasets, training_jobs, models)
+        _storage_backend = InMemoryBackend(datasets, training_jobs, models, generation_jobs)
 
     return _storage_backend

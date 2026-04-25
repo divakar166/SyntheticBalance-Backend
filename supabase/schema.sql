@@ -24,6 +24,27 @@ create table if not exists public.training_jobs (
     error text,
     model_id text,
     model_path text,
+    modal_call_id text,
+    last_heartbeat timestamptz,
+    started_at timestamptz,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+alter table public.training_jobs
+    add column if not exists modal_call_id text;
+
+create table if not exists public.generation_jobs (
+    job_id text primary key,
+    dataset_id text not null references public.datasets(id) on delete cascade,
+    status text not null,
+    n_samples integer not null,
+    synthetic_id text references public.datasets(id) on delete set null,
+    synthetic_path text,
+    preview jsonb not null default '[]'::jsonb,
+    generation_time_seconds double precision,
+    error text,
+    modal_call_id text,
     last_heartbeat timestamptz,
     started_at timestamptz,
     created_at timestamptz not null default now(),
@@ -40,6 +61,9 @@ create table if not exists public.trained_models (
 
 create index if not exists idx_training_jobs_dataset_id
     on public.training_jobs (dataset_id, created_at desc);
+
+create index if not exists idx_generation_jobs_dataset_id
+    on public.generation_jobs (dataset_id, created_at desc);
 
 create index if not exists idx_trained_models_dataset_id
     on public.trained_models (dataset_id);

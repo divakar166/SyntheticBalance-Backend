@@ -170,12 +170,85 @@ def train_ctgan_modal(dataset_id: str, job_id: str, epochs: int = 100) -> dict:
     return summary
 
 
+@app.function(
+    secrets=secrets,
+    gpu="T4",
+    timeout=60 * 60
+)
+def generate_ctgan_modal(dataset_id: str, job_id: str, n_samples: int = 5000) -> dict:
+    import sys
+    if "/backend" not in sys.path:
+        sys.path.insert(0, "/backend")
+
+    from services.generation import generate_synthetic_dataset
+
+    env = dict(os.environ)
+    backend = _get_backend(env)
+
+    job = backend.get_generation_job(job_id)
+    if not job:
+        raise RuntimeError(f"Generation job '{job_id}' not found in storage.")
+
+    started_at = datetime.now(timezone.utc)
+    backend.update_generation_job(job_id, {
+        "status": "running",
+        "started_at": started_at.isoformat(),
+        "updated_at": _utc_now_iso(),
+    })
+
+    try:
+        result = generate_synthetic_dataset(
+            backend=backend,
+            dataset_id=dataset_id,
+            n_samples=n_samples,
+            job_id=job_id,
+            source="modal",
+        )
+    except Exception as exc:
+        elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+        backend.update_generation_job(job_id, {
+            "status": "failed",
+            "error": str(exc),
+            "generation_time_seconds": float(elapsed),
+            "updated_at": _utc_now_iso(),
+        })
+        raise
+
+    backend.update_generation_job(job_id, {
+        "status": "completed",
+        "synthetic_id": result["synthetic_id"],
+        "synthetic_path": result["synthetic_path"],
+        "n_samples": result["n_samples"],
+        "preview": result["preview"],
+        "generation_time_seconds": result["generation_time_seconds"],
+        "last_heartbeat": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+    })
+
+    summary = {
+        "job_id": job_id,
+        "dataset_id": dataset_id,
+        "synthetic_id": result["synthetic_id"],
+        "n_samples": result["n_samples"],
+        "generation_time_seconds": result["generation_time_seconds"],
+    }
+    print("Generation complete:", summary)
+    return summary
+
+
 
 @app.local_entrypoint()
-def main(dataset_id: str, job_id: str, epochs: int = 100):
-    result = train_ctgan_modal.remote(
-        dataset_id=dataset_id,
-        job_id=job_id,
-        epochs=epochs,
-    )
+def main(dataset_id: str, job_id: str, epochs: int = 100, n_samples: int = 5000, mode: str = "train"):
+    if mode == "generate":
+        result = generate_ctgan_modal.remote(
+            dataset_id=dataset_id,
+            job_id=job_id,
+            n_samples=n_samples,
+        )
+    else:
+        result = train_ctgan_modal.remote(
+            dataset_id=dataset_id,
+            job_id=job_id,
+            epochs=epochs,
+        )
     print("Result:", result)

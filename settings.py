@@ -28,6 +28,7 @@ class AppSettings(BaseSettings):
     supabase_service_role_key: str | None = None
     supabase_datasets_table: str = "datasets"
     supabase_training_jobs_table: str = "training_jobs"
+    supabase_generation_jobs_table: str = "generation_jobs"
     supabase_models_table: str = "trained_models"
 
     minio_endpoint: str = "127.0.0.1:9000"

@@ -25,6 +25,15 @@ class PersistenceBackend:
     def get_training_job(self, job_or_dataset_id: str) -> dict | None:
         raise NotImplementedError
 
+    def save_generation_job(self, job: dict) -> dict:
+        raise NotImplementedError
+
+    def update_generation_job(self, job_id: str, values: dict) -> dict:
+        raise NotImplementedError
+
+    def get_generation_job(self, job_or_dataset_id: str) -> dict | None:
+        raise NotImplementedError
+
     def save_model(self, dataset_id: str, local_model_path: str | Path, metadata: dict | None = None) -> dict:
         raise NotImplementedError
 

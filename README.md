@@ -6,7 +6,7 @@ This backend supports three storage modes:
 - `SupabaseMinioBackend`: Supabase metadata plus MinIO object storage.
 - `SupabaseS3Backend`: Supabase metadata plus AWS S3 object storage.
 
-For Modal-compatible training, use Supabase + AWS S3.
+For Modal-compatible training and generation, use Supabase + AWS S3.
 
 ## Environment Variables
 
@@ -47,6 +47,28 @@ Example names:
 ## Supabase Schema
 
 Apply the SQL in [schema.sql](D:\Projects\synthetic-data-poc\backend\supabase\schema.sql) before running the backend.
+
+The schema includes:
+
+- `training_jobs` for CTGAN training progress
+- `generation_jobs` for async synthetic dataset generation progress
+- `trained_models` for the latest trained model artifact per source dataset
+
+## Async Synthetic Generation
+
+`POST /api/generate?dataset_id=<dataset_id>&n_samples=5000` now creates a generation job and returns immediately:
+
+```json
+{
+  "job_id": "...",
+  "dataset_id": "...",
+  "status": "queued",
+  "n_samples": 5000
+}
+```
+
+Poll `GET /api/generate-status/<job_id>` or `GET /api/generate-status/<dataset_id>`.
+When the job completes, the response includes `synthetic_id`, which can be passed to `/api/evaluate`.
 
 ## Notes
 

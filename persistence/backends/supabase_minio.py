@@ -25,6 +25,7 @@ class SupabaseMinioBackend(PersistenceBackend):
         self.model_bucket = settings.minio_model_bucket
         self.datasets_table = settings.supabase_datasets_table
         self.training_jobs_table = settings.supabase_training_jobs_table
+        self.generation_jobs_table = settings.supabase_generation_jobs_table
         self.models_table = settings.supabase_models_table
         self._supabase = None
         self._minio = None
@@ -174,6 +175,44 @@ class SupabaseMinioBackend(PersistenceBackend):
         try:
             fallback = (
                 self.supabase.table(self.training_jobs_table)
+                .select("*")
+                .eq("dataset_id", job_or_dataset_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        if not fallback.data:
+            return None
+        return dict(fallback.data[0])
+
+    def save_generation_job(self, job: dict) -> dict:
+        try:
+            self.supabase.table(self.generation_jobs_table).upsert(self._serialize_record(job)).execute()
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        return job
+
+    def update_generation_job(self, job_id: str, values: dict) -> dict:
+        try:
+            self.supabase.table(self.generation_jobs_table).update(values).eq("job_id", job_id).execute()
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        return values
+
+    def get_generation_job(self, job_or_dataset_id: str) -> dict | None:
+        try:
+            direct = (
+                self.supabase.table(self.generation_jobs_table).select("*").eq("job_id", job_or_dataset_id).limit(1).execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        if direct.data:
+            return dict(direct.data[0])
+        try:
+            fallback = (
+                self.supabase.table(self.generation_jobs_table)
                 .select("*")
                 .eq("dataset_id", job_or_dataset_id)
                 .order("created_at", desc=True)

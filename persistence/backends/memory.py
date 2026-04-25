@@ -9,10 +9,11 @@ from .base import PersistenceBackend
 
 
 class InMemoryBackend(PersistenceBackend):
-    def __init__(self, datasets: dict, training_jobs: dict, models: dict):
+    def __init__(self, datasets: dict, training_jobs: dict, models: dict, generation_jobs: dict | None = None):
         self.datasets = datasets
         self.training_jobs = training_jobs
         self.models = models
+        self.generation_jobs = generation_jobs if generation_jobs is not None else {}
 
     def save_dataset(self, dataset_id: str, df: pd.DataFrame, schema: dict, metadata: dict) -> dict:
         record = {
@@ -42,6 +43,23 @@ class InMemoryBackend(PersistenceBackend):
         if direct:
             return direct
         for job in reversed(list(self.training_jobs.values())):
+            if job["dataset_id"] == job_or_dataset_id:
+                return job
+        return None
+
+    def save_generation_job(self, job: dict) -> dict:
+        self.generation_jobs[job["job_id"]] = dict(job)
+        return self.generation_jobs[job["job_id"]]
+
+    def update_generation_job(self, job_id: str, values: dict) -> dict:
+        self.generation_jobs[job_id].update(values)
+        return self.generation_jobs[job_id]
+
+    def get_generation_job(self, job_or_dataset_id: str) -> dict | None:
+        direct = self.generation_jobs.get(job_or_dataset_id)
+        if direct:
+            return direct
+        for job in reversed(list(self.generation_jobs.values())):
             if job["dataset_id"] == job_or_dataset_id:
                 return job
         return None

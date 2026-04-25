@@ -1,13 +1,19 @@
 import logging
-from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.state import get_storage_backend
+from services.generation import (
+    create_generation_job,
+    find_generation_job,
+    generation_status_payload,
+    run_generation_job,
+)
 from services.training import (
     create_training_job,
     find_training_job,
@@ -28,7 +34,22 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Synthetic Data Generator", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app):
+
+    try:
+        health = get_storage_backend().get_health_status()
+        logger.info("Storage backend: %s", health["backend"])
+        for service_name, status in health.items():
+            if service_name == "backend":
+                continue
+            logger.info("%s status: %s", service_name.capitalize(), status)
+    except Exception:
+        logger.exception("Storage startup check failed")
+    
+    yield
+
+app = FastAPI(title="Synthetic Data Generator", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,20 +80,6 @@ def health_check():
         "version": "0.1.0",
         "storage": backend.get_health_status(),
     }
-
-
-@app.on_event("startup")
-def startup_storage_check():
-    try:
-        health = get_storage_backend().get_health_status()
-        logger.info("Storage backend: %s", health["backend"])
-        for service_name, status in health.items():
-            if service_name == "backend":
-                continue
-            logger.info("%s status: %s", service_name.capitalize(), status)
-    except Exception:
-        logger.exception("Storage startup check failed")
-
 
 @app.post("/api/upload")
 async def upload_csv(
@@ -128,10 +135,19 @@ async def get_train_status(job_id: str):
 
 
 @app.post("/api/generate")
-async def generate_synthetic(dataset_id: str, n_samples: int = 5000):
-    from generators.ctgan import CTGANWrapper
+async def generate_synthetic(background_tasks: BackgroundTasks, dataset_id: str, n_samples: int = 5000):
+    if n_samples <= 0:
+        raise HTTPException(status_code=400, detail="n_samples must be greater than 0.")
 
     backend = get_storage_backend()
+    try:
+        exists = backend.dataset_exists(dataset_id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+
     try:
         model_record = backend.get_model(dataset_id)
     except Exception as exc:
@@ -141,46 +157,44 @@ async def generate_synthetic(dataset_id: str, n_samples: int = 5000):
         raise HTTPException(status_code=404, detail=f"Model for dataset '{dataset_id}' not found.")
 
     try:
-        temp_file, _ = backend.download_model_to_tempfile(dataset_id)
+        job = create_generation_job(dataset_id, n_samples)
     except Exception as exc:
         raise storage_operation_error(exc) from exc
-
-    try:
-        ctgan = CTGANWrapper.load(temp_file.name)
-    finally:
-        Path(temp_file.name).unlink(missing_ok=True)
-
-    synthetic_df = ctgan.generate(n_samples)
-
-    try:
-        source_dataset = backend.get_dataset(dataset_id)
-    except Exception as exc:
-        raise storage_operation_error(exc) from exc
-
-    synthetic_record = create_dataset_record(
-        synthetic_df,
-        f"synthetic_{dataset_id}.csv",
-        source_dataset["target"],
-        dataset_type="synthetic",
-        extra_metadata={"source_dataset_id": dataset_id},
-    )
+    background_tasks.add_task(run_generation_job, job["job_id"])
     return {
-        "synthetic_id": synthetic_record["dataset_id"],
-        "n_samples": len(synthetic_df),
-        "preview": synthetic_df.head(5).to_dict(orient="records"),
+        "job_id": job["job_id"],
+        "dataset_id": dataset_id,
+        "status": job["status"],
+        "n_samples": job["n_samples"],
     }
 
 
+@app.get("/api/generate-status/{job_id}")
+async def get_generate_status(job_id: str):
+    try:
+        job = find_generation_job(job_id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Generation job or dataset '{job_id}' not found.")
+
+    return generation_status_payload(job)
+
+class EvaluationRequest(BaseModel):
+    dataset_id: str
+    synthetic_id: str
+
 @app.post("/api/evaluate")
-async def evaluate(dataset_id: str, synthetic_id: str):
+async def evaluate(request: EvaluationRequest):
     from downstream.classifier import ClassifierPipeline
     from evaluation.privacy import PrivacyMetrics
     from evaluation.quality import QualityMetrics
 
     backend = get_storage_backend()
     try:
-        real_dataset = backend.get_dataset(dataset_id)
-        synthetic_dataset = backend.get_dataset(synthetic_id)
+        real_dataset = backend.get_dataset(request.dataset_id)
+        synthetic_dataset = backend.get_dataset(request.synthetic_id)
     except Exception as exc:
         raise storage_operation_error(exc) from exc
 
