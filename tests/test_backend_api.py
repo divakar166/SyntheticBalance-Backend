@@ -18,8 +18,11 @@ from main import (
     upload_csv,
 )
 from persistence import InMemoryBackend
+from services.auth import AuthenticatedUser
 from services.generation import create_generation_job
 from services.generation import _run_local as run_generation_local
+
+TEST_USER = AuthenticatedUser(id="user-1", email="user@example.com")
 
 
 def csv_bytes(df: pd.DataFrame) -> bytes:
@@ -55,13 +58,19 @@ class BackendApiTests(unittest.TestCase):
                 "target": {"name": "fraud", "type": "categorical"},
             },
             "target": "fraud",
-            "metadata": {"target": "fraud", "upload_time": "2026-04-24T00:00:00+00:00"},
+            "user_id": TEST_USER.id,
+            "metadata": {
+                "target": "fraud",
+                "upload_time": "2026-04-24T00:00:00+00:00",
+                "user_id": TEST_USER.id,
+            },
         }
         app_state.models["dataset-1"] = {
             "id": "dataset-1",
             "dataset_id": "dataset-1",
             "object_key": "ctgan/dataset-1.pkl",
-            "metadata": {},
+            "user_id": TEST_USER.id,
+            "metadata": {"user_id": TEST_USER.id},
         }
 
     def tearDown(self):
@@ -77,7 +86,7 @@ class BackendApiTests(unittest.TestCase):
             filename=filename,
             headers=Headers({"content-type": content_type}),
         )
-        return asyncio.run(upload_csv(file=upload, target="fraud"))
+        return asyncio.run(upload_csv(file=upload, target="fraud", current_user=TEST_USER))
 
     def json_body(self, response):
         return json.loads(response.body.decode("utf-8"))
@@ -111,6 +120,7 @@ class BackendApiTests(unittest.TestCase):
             train_ctgan(
                 TrainRequest(dataset_id="dataset-1", epochs=3),
                 background_tasks=background_tasks,
+                current_user=TEST_USER,
             )
         )
 
@@ -125,6 +135,7 @@ class BackendApiTests(unittest.TestCase):
                 train_ctgan(
                     TrainRequest(dataset_id="missing-dataset", epochs=3),
                     background_tasks=BackgroundTasks(),
+                    current_user=TEST_USER,
                 )
             )
 
@@ -135,17 +146,19 @@ class BackendApiTests(unittest.TestCase):
             train_ctgan(
                 TrainRequest(dataset_id="dataset-1", epochs=2),
                 background_tasks=BackgroundTasks(),
+                current_user=TEST_USER,
             )
         )
         second = asyncio.run(
             train_ctgan(
                 TrainRequest(dataset_id="dataset-1", epochs=4),
                 background_tasks=BackgroundTasks(),
+                current_user=TEST_USER,
             )
         )
         app_state.training_jobs[first["job_id"]]["status"] = "completed"
 
-        response = asyncio.run(get_train_status("dataset-1"))
+        response = asyncio.run(get_train_status("dataset-1", current_user=TEST_USER))
 
         self.assertEqual(response["job_id"], second["job_id"])
         self.assertEqual(response["total_epochs"], 4)
@@ -158,6 +171,7 @@ class BackendApiTests(unittest.TestCase):
                 background_tasks=background_tasks,
                 dataset_id="dataset-1",
                 n_samples=25,
+                current_user=TEST_USER,
             )
         )
 
@@ -176,6 +190,7 @@ class BackendApiTests(unittest.TestCase):
                     background_tasks=BackgroundTasks(),
                     dataset_id="dataset-1",
                     n_samples=25,
+                    current_user=TEST_USER,
                 )
             )
 
@@ -183,17 +198,17 @@ class BackendApiTests(unittest.TestCase):
         self.assertIn("Model for dataset 'dataset-1' not found", exc.exception.detail)
 
     def test_get_generate_status_returns_latest_job_for_dataset(self):
-        first = create_generation_job("dataset-1", 10)
-        second = create_generation_job("dataset-1", 20)
+        first = create_generation_job("dataset-1", 10, TEST_USER.id)
+        second = create_generation_job("dataset-1", 20, TEST_USER.id)
         app_state.generation_jobs[first["job_id"]]["status"] = "completed"
 
-        response = asyncio.run(get_generate_status("dataset-1"))
+        response = asyncio.run(get_generate_status("dataset-1", current_user=TEST_USER))
 
         self.assertEqual(response["job_id"], second["job_id"])
         self.assertEqual(response["n_samples"], 20)
 
     def test_local_generation_job_marks_completed(self):
-        job = create_generation_job("dataset-1", 5)
+        job = create_generation_job("dataset-1", 5, TEST_USER.id)
 
         with patch(
             "services.generation.generate_synthetic_dataset",
@@ -214,7 +229,7 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(updated["generation_time_seconds"], 1.25)
 
     def test_local_generation_job_marks_failure(self):
-        job = create_generation_job("dataset-1", 5)
+        job = create_generation_job("dataset-1", 5, TEST_USER.id)
 
         with patch("services.generation.generate_synthetic_dataset", side_effect=RuntimeError("boom")):
             run_generation_local(job["job_id"])

@@ -18,13 +18,14 @@ def find_generation_job(job_or_dataset_id: str) -> dict | None:
     return get_storage_backend().get_generation_job(job_or_dataset_id)
 
 
-def create_generation_job(dataset_id: str, n_samples: int) -> dict:
+def create_generation_job(dataset_id: str, n_samples: int, user_id: str | None = None) -> dict:
     if n_samples <= 0:
         raise ValueError("n_samples must be greater than 0.")
 
     job = {
         "job_id": str(uuid.uuid4()),
         "dataset_id": dataset_id,
+        "user_id": user_id,
         "status": "queued",
         "n_samples": int(n_samples),
         "synthetic_id": None,
@@ -191,6 +192,7 @@ def generate_synthetic_dataset(
         synthetic_df,
         f"synthetic_{dataset_id}.csv",
         target,
+        user_id=source_dataset.get("user_id") or (source_dataset.get("metadata") or {}).get("user_id"),
         dataset_type="synthetic",
         extra_metadata={
             "source_dataset_id": dataset_id,

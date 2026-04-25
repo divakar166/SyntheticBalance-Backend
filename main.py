@@ -1,12 +1,13 @@
 import logging
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from services.auth import AuthenticatedUser, ensure_user_owns_record, require_user
 from services.state import get_storage_backend
 from services.generation import (
     create_generation_job,
@@ -85,13 +86,14 @@ def health_check():
 async def upload_csv(
     file: UploadFile = File(...),
     target: str = Form("fraud"),
+    current_user: AuthenticatedUser = Depends(require_user),
 ):
     try:
         validate_csv_file(file.filename, file.content_type)
         content = await file.read()
         df = load_csv(content)
         validate_target_column(df, target)
-        return create_dataset_record(df, file.filename or "dataset.csv", target)
+        return create_dataset_record(df, file.filename or "dataset.csv", target, user_id=current_user.id)
     except UploadValidationError as exc:
         extra = {}
         if exc.available_columns:
@@ -103,16 +105,22 @@ async def upload_csv(
 
 
 @app.post("/api/train-ctgan")
-async def train_ctgan(request: TrainRequest, background_tasks: BackgroundTasks):
+async def train_ctgan(
+    request: TrainRequest,
+    background_tasks: BackgroundTasks,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
+    backend = get_storage_backend()
     try:
-        exists = get_storage_backend().dataset_exists(request.dataset_id)
+        dataset = backend.get_dataset(request.dataset_id)
     except Exception as exc:
         raise storage_operation_error(exc) from exc
 
-    if not exists:
+    if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset '{request.dataset_id}' not found.")
+    ensure_user_owns_record(dataset, current_user, f"Dataset '{request.dataset_id}'")
 
-    job = create_training_job(request.dataset_id, request.epochs)
+    job = create_training_job(request.dataset_id, request.epochs, current_user.id)
     background_tasks.add_task(run_training_job, job["job_id"])
     return {
         "job_id": job["job_id"],
@@ -122,7 +130,10 @@ async def train_ctgan(request: TrainRequest, background_tasks: BackgroundTasks):
 
 
 @app.get("/api/train-status/{job_id}")
-async def get_train_status(job_id: str):
+async def get_train_status(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
     try:
         job = find_training_job(job_id)
     except Exception as exc:
@@ -130,23 +141,30 @@ async def get_train_status(job_id: str):
 
     if not job:
         raise HTTPException(status_code=404, detail=f"Training job or dataset '{job_id}' not found.")
+    ensure_user_owns_record(job, current_user, f"Training job or dataset '{job_id}'")
 
     return training_status_payload(job)
 
 
 @app.post("/api/generate")
-async def generate_synthetic(background_tasks: BackgroundTasks, dataset_id: str, n_samples: int = 5000):
+async def generate_synthetic(
+    background_tasks: BackgroundTasks,
+    dataset_id: str,
+    n_samples: int = 5000,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
     if n_samples <= 0:
         raise HTTPException(status_code=400, detail="n_samples must be greater than 0.")
 
     backend = get_storage_backend()
     try:
-        exists = backend.dataset_exists(dataset_id)
+        dataset = backend.get_dataset(dataset_id)
     except Exception as exc:
         raise storage_operation_error(exc) from exc
 
-    if not exists:
+    if not dataset:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+    ensure_user_owns_record(dataset, current_user, f"Dataset '{dataset_id}'")
 
     try:
         model_record = backend.get_model(dataset_id)
@@ -157,7 +175,7 @@ async def generate_synthetic(background_tasks: BackgroundTasks, dataset_id: str,
         raise HTTPException(status_code=404, detail=f"Model for dataset '{dataset_id}' not found.")
 
     try:
-        job = create_generation_job(dataset_id, n_samples)
+        job = create_generation_job(dataset_id, n_samples, current_user.id)
     except Exception as exc:
         raise storage_operation_error(exc) from exc
     background_tasks.add_task(run_generation_job, job["job_id"])
@@ -170,7 +188,10 @@ async def generate_synthetic(background_tasks: BackgroundTasks, dataset_id: str,
 
 
 @app.get("/api/generate-status/{job_id}")
-async def get_generate_status(job_id: str):
+async def get_generate_status(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
     try:
         job = find_generation_job(job_id)
     except Exception as exc:
@@ -178,15 +199,42 @@ async def get_generate_status(job_id: str):
 
     if not job:
         raise HTTPException(status_code=404, detail=f"Generation job or dataset '{job_id}' not found.")
+    ensure_user_owns_record(job, current_user, f"Generation job or dataset '{job_id}'")
 
     return generation_status_payload(job)
+
+
+@app.get("/api/datasets")
+async def list_user_datasets(current_user: AuthenticatedUser = Depends(require_user)):
+    try:
+        datasets = get_storage_backend().list_datasets(current_user.id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+    return {"datasets": datasets}
+
+
+@app.delete("/api/datasets/{dataset_id}")
+async def delete_user_dataset(
+    dataset_id: str,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
+    try:
+        deleted = get_storage_backend().delete_dataset(dataset_id, current_user.id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+    return {"deleted": True, "dataset_id": dataset_id}
 
 class EvaluationRequest(BaseModel):
     dataset_id: str
     synthetic_id: str
 
 @app.post("/api/evaluate")
-async def evaluate(request: EvaluationRequest):
+async def evaluate(
+    request: EvaluationRequest,
+    current_user: AuthenticatedUser = Depends(require_user),
+):
     from downstream.classifier import ClassifierPipeline
     from evaluation.privacy import PrivacyMetrics
     from evaluation.quality import QualityMetrics
@@ -200,6 +248,8 @@ async def evaluate(request: EvaluationRequest):
 
     if not real_dataset or not synthetic_dataset:
         raise HTTPException(status_code=404, detail="One or more datasets were not found.")
+    ensure_user_owns_record(real_dataset, current_user, "Real dataset")
+    ensure_user_owns_record(synthetic_dataset, current_user, "Synthetic dataset")
 
     real_df = real_dataset["df"]
     syn_df = synthetic_dataset["df"]

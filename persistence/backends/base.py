@@ -13,6 +13,12 @@ class PersistenceBackend:
     def get_dataset(self, dataset_id: str) -> dict | None:
         raise NotImplementedError
 
+    def list_datasets(self, user_id: str) -> list[dict]:
+        raise NotImplementedError
+
+    def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
+        raise NotImplementedError
+
     def dataset_exists(self, dataset_id: str) -> bool:
         return self.get_dataset(dataset_id) is not None
 

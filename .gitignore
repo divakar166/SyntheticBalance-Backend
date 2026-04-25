@@ -12,3 +12,6 @@ wheels/
 models/
 
 .env*
+
+.pytest_cache/
+.uv-cache/

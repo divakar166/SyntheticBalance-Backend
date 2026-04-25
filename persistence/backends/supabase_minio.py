@@ -127,6 +127,7 @@ class SupabaseMinioBackend(PersistenceBackend):
             "class_dist": schema.get("target", {}).get("class_distribution", {}),
             "schema": schema,
             "metadata": metadata,
+            "user_id": metadata.get("user_id"),
             "created_at": metadata.get("upload_time"),
         }
         try:
@@ -148,6 +149,72 @@ class SupabaseMinioBackend(PersistenceBackend):
         csv_bytes = self._download_bytes(self.dataset_bucket, record["object_key"])
         record["df"] = normalize_dataframe(pd.read_csv(io.BytesIO(csv_bytes)))
         return record
+
+    def list_datasets(self, user_id: str) -> list[dict]:
+        try:
+            response = (
+                self.supabase.table(self.datasets_table)
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+
+        return [self._dataset_summary(dict(record)) for record in response.data or []]
+
+    def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
+        try:
+            response = (
+                self.supabase.table(self.datasets_table)
+                .select("id, object_key")
+                .eq("id", dataset_id)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        if not response.data:
+            return False
+
+        object_key = response.data[0].get("object_key")
+        if object_key:
+            try:
+                self.minio.remove_object(self.dataset_bucket, object_key)
+            except Exception:
+                pass
+
+        model = self.get_model(dataset_id)
+        if model and model.get("object_key"):
+            try:
+                self.minio.remove_object(self.model_bucket, model["object_key"])
+            except Exception:
+                pass
+
+        try:
+            self.supabase.table(self.datasets_table).delete().eq("id", dataset_id).eq("user_id", user_id).execute()
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        return True
+
+    def _dataset_summary(self, record: dict) -> dict:
+        dataset_id = record["id"]
+        return {
+            "id": dataset_id,
+            "filename": record.get("filename"),
+            "dataset_type": record.get("dataset_type", "real"),
+            "target": record.get("target"),
+            "n_rows": record.get("n_rows"),
+            "n_features": record.get("n_features"),
+            "class_dist": record.get("class_dist") or {},
+            "schema": record.get("schema"),
+            "created_at": record.get("created_at"),
+            "has_model": self.get_model(dataset_id) is not None,
+            "latest_training_job": self.get_training_job(dataset_id),
+            "latest_generation_job": self.get_generation_job(dataset_id),
+        }
 
     def save_training_job(self, job: dict) -> dict:
         try:
@@ -234,6 +301,7 @@ class SupabaseMinioBackend(PersistenceBackend):
             "dataset_id": dataset_id,
             "object_key": object_key,
             "metadata": metadata or {},
+            "user_id": (metadata or {}).get("user_id"),
             "created_at": metadata.get("trained_at") if metadata else None,
         }
         try:

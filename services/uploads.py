@@ -96,6 +96,7 @@ def create_dataset_record(
     filename: str,
     target: str,
     *,
+    user_id: str | None = None,
     dataset_type: str = "real",
     extra_metadata: dict | None = None,
     storage_backend=None,
@@ -112,6 +113,8 @@ def create_dataset_record(
         "class_imbalance": class_imbalance,
         "dataset_type": dataset_type,
     }
+    if user_id:
+        metadata["user_id"] = user_id
     if extra_metadata:
         metadata.update(extra_metadata)
     backend = storage_backend or get_storage_backend()

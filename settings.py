@@ -26,6 +26,7 @@ class AppSettings(BaseSettings):
 
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
+    supabase_anon_key: str | None = None
     supabase_datasets_table: str = "datasets"
     supabase_training_jobs_table: str = "training_jobs"
     supabase_generation_jobs_table: str = "generation_jobs"

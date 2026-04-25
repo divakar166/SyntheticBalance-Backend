@@ -143,7 +143,12 @@ def train_ctgan_modal(dataset_id: str, job_id: str, epochs: int = 100) -> dict:
     model_record = backend.save_model(
         dataset_id,
         tmp_path,
-        metadata={"trained_at": _utc_now_iso(), "job_id": job_id, "source": "modal"},
+        metadata={
+            "trained_at": _utc_now_iso(),
+            "job_id": job_id,
+            "source": "modal",
+            "user_id": job.get("user_id"),
+        },
     )
     tmp_path.unlink(missing_ok=True)
 

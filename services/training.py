@@ -23,10 +23,11 @@ def find_training_job(job_or_dataset_id: str) -> dict | None:
     return get_storage_backend().get_training_job(job_or_dataset_id)
 
 
-def create_training_job(dataset_id: str, epochs: int) -> dict:
+def create_training_job(dataset_id: str, epochs: int, user_id: str | None = None) -> dict:
     job = {
         "job_id": str(uuid.uuid4()),
         "dataset_id": dataset_id,
+        "user_id": user_id,
         "status": "queued",
         "current_epoch": 0,
         "total_epochs": epochs,
@@ -177,7 +178,12 @@ def _run_local(job_id: str):
         model_record = backend.save_model(
             dataset_id,
             local_model_path,
-            metadata={"trained_at": utc_now_iso(), "job_id": job_id, "source": "local"},
+            metadata={
+                "trained_at": utc_now_iso(),
+                "job_id": job_id,
+                "source": "local",
+                "user_id": job.get("user_id"),
+            },
         )
         local_model_path.unlink(missing_ok=True)
 
