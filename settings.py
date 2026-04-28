@@ -32,13 +32,6 @@ class AppSettings(BaseSettings):
     supabase_generation_jobs_table: str = "generation_jobs"
     supabase_models_table: str = "trained_models"
 
-    minio_endpoint: str = "127.0.0.1:9000"
-    minio_access_key: str | None = None
-    minio_secret_key: str | None = None
-    minio_secure: bool = False
-    minio_dataset_bucket: str = "synthetic-datasets"
-    minio_model_bucket: str = "synthetic-models"
-
     aws_region: str | None = None
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None

@@ -168,6 +168,7 @@ def train_ctgan_modal(
     )
 
     try:
+        configs = ctgan.get_config()
         ctgan.train(df, target_col=target_col, progress_callback=update_progress)
     except Exception as exc:
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
@@ -211,6 +212,7 @@ def train_ctgan_modal(
             "config": ctgan.get_config(),
             "sdmetrics": sdmetrics_result,
         },
+        config=configs,
     )
     tmp_path.unlink(missing_ok=True)
 

@@ -339,6 +339,14 @@ async def list_user_datasets(current_user: AuthenticatedUser = Depends(require_u
         raise storage_operation_error(exc) from exc
     return {"datasets": datasets}
 
+@app.get("/api/models")
+async def list_user_models(current_user: AuthenticatedUser = Depends(require_user)):
+    try:
+        models = get_storage_backend().list_models(current_user.id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+    return {"models": models}
+
 
 @app.delete("/api/datasets/{dataset_id}")
 async def delete_user_dataset(

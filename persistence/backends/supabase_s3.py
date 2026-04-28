@@ -198,6 +198,20 @@ class SupabaseS3Backend(PersistenceBackend):
             raise self._format_storage_error("Supabase", exc) from exc
 
         return [self._dataset_summary(dict(record)) for record in response.data or []]
+    
+    def list_models(self, user_id: str) -> list[dict]:
+        try:
+            response = (
+                self.supabase.table(self.models_table)
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+
+        return [self._model_summary(dict(record)) for record in response.data or []]
 
     def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
         try:
@@ -250,6 +264,18 @@ class SupabaseS3Backend(PersistenceBackend):
             "latest_training_job": self.get_training_job(dataset_id),
             "latest_generation_job": self.get_generation_job(dataset_id),
         }
+
+    def _model_summary(self, record: dict) -> dict:
+        model_id = record["id"]
+        return {
+            "id": model_id,
+            "dataset_id": record.get("dataset_id"),
+            "object_key": record.get("object_key"),
+            "metadata": record.get("metadata"),
+            "sdmetrics_quality_score": record.get("sdmetrics_quality_score"),
+            "sdmetrics_diagnostic_score": record.get("sdmetrics_diagnostic_score"),
+            "created_at": record.get("created_at"),
+        } 
 
     def save_training_job(self, job: dict) -> dict:
         try:
@@ -335,7 +361,7 @@ class SupabaseS3Backend(PersistenceBackend):
             return None
         return dict(fallback.data[0])
 
-    def save_model(self, dataset_id: str, local_model_path: str | Path, metadata: dict | None = None) -> dict:
+    def save_model(self, dataset_id: str, local_model_path: str | Path, metadata: dict | None = None, config: dict | None = None) -> dict:
         local_model_path = Path(local_model_path)
         relative_key = f"ctgan/{str(uuid4())}.pkl"
         object_key   = self._model_key(relative_key)
@@ -351,6 +377,7 @@ class SupabaseS3Backend(PersistenceBackend):
             "dataset_id": dataset_id,
             "object_key": object_key,
             "metadata": metadata or {},
+            "config": config or {},
             "user_id": (metadata or {}).get("user_id"),
             "created_at": metadata.get("trained_at") if metadata else None,
         }
