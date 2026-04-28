@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from persistence import InMemoryBackend, SupabaseMinioBackend, SupabaseS3Backend
+from persistence import InMemoryBackend, SupabaseS3Backend
 
 datasets = {}
 models = {}
@@ -25,16 +25,9 @@ def get_storage_backend():
         and os.getenv("AWS_S3_DATASET_BUCKET")
         and os.getenv("AWS_S3_MODEL_BUCKET")
     )
-    has_minio = bool(
-        os.getenv("MINIO_ACCESS_KEY")
-        and os.getenv("MINIO_SECRET_KEY")
-        and os.getenv("MINIO_ENDPOINT")
-    )
 
     if has_supabase and has_s3:
         _storage_backend = SupabaseS3Backend()
-    elif has_supabase and has_minio:
-        _storage_backend = SupabaseMinioBackend()
     else:
         _storage_backend = InMemoryBackend(datasets, training_jobs, models, generation_jobs)
 

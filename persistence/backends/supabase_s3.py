@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 
 import boto3
 import pandas as pd
+from uuid import uuid4
 from botocore.exceptions import ClientError
 
 from handlers.data_handler import normalize_dataframe
@@ -336,7 +337,7 @@ class SupabaseS3Backend(PersistenceBackend):
 
     def save_model(self, dataset_id: str, local_model_path: str | Path, metadata: dict | None = None) -> dict:
         local_model_path = Path(local_model_path)
-        relative_key = f"ctgan/{dataset_id}.pkl"
+        relative_key = f"ctgan/{str(uuid4())}.pkl"
         object_key   = self._model_key(relative_key)
 
         self._upload_bytes(
@@ -346,7 +347,7 @@ class SupabaseS3Backend(PersistenceBackend):
             "application/octet-stream",
         )
         record = {
-            "id": dataset_id,
+            "id": str(uuid4()),
             "dataset_id": dataset_id,
             "object_key": object_key,
             "metadata": metadata or {},

@@ -21,6 +21,8 @@ class SchemaDetector:
     
     NUMERIC_THRESHOLD = 0.9  # If >90% values are numeric, treat as numeric
     CATEGORICAL_THRESHOLD = 20  # If <20 unique values, treat as categorical
+    UNIQUE_RATIO_THRESHOLD = 0.95
+    LOW_CARDINALITY_OVERRIDE = 5  # Force categorical if unique values ≤ this
     
     @staticmethod
     def detect(df: pd.DataFrame, target_col: str = None) -> Dict[str, Dict]:
@@ -87,6 +89,10 @@ class SchemaDetector:
         numeric_ratio = float(coerced_numeric.notna().mean())
         unique_count = int(non_null.nunique())
         is_constant = unique_count <= 1
+        unique_ratio = unique_count / len(non_null)
+
+        if unique_ratio >= SchemaDetector.UNIQUE_RATIO_THRESHOLD and unique_count > 50:
+            return None
 
         base_profile: Dict[str, Any] = {
             'missing_count': missing_count,
@@ -110,7 +116,8 @@ class SchemaDetector:
             'most_common_freq': None,
         }
 
-        if numeric_ratio >= SchemaDetector.NUMERIC_THRESHOLD:
+        is_low_cardinality = unique_count <= SchemaDetector.LOW_CARDINALITY_OVERRIDE
+        if numeric_ratio >= SchemaDetector.NUMERIC_THRESHOLD and not is_low_cardinality:
             q1 = coerced_numeric.quantile(0.25)
             q3 = coerced_numeric.quantile(0.75)
             return {

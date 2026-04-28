@@ -159,7 +159,7 @@ def generate_synthetic_dataset(
     dataset_id: str,
     n_samples: int,
     job_id: str | None,
-    source: str,
+    source: str
 ) -> dict:
     from generators.ctgan import CTGANWrapper
 
