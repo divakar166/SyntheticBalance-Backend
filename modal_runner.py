@@ -195,8 +195,6 @@ def train_ctgan_modal(
             "source": "modal",
             "gpu": "T4",
             "user_id": job.get("user_id"),
-            "config": ctgan.get_config(),
-            "sdmetrics": sdmetrics_result,
         },
         config=configs,
     )
@@ -238,7 +236,7 @@ def train_ctgan_modal(
 
     rich_metadata = {
         "status": "completed",
-        "model_id": dataset_id,
+        "model_id": model_record["id"],
         "model_path": model_record["object_key"],
         # Convergence & timing
         "epochs_trained": epochs_trained,
@@ -303,6 +301,7 @@ def train_ctgan_modal(
 def generate_ctgan_modal(
     dataset_id: str,
     job_id: str,
+    model_id: str | None = None,
     n_samples: int = 5000,
     run_sdmetrics: bool = True,
 ) -> dict:
@@ -327,9 +326,11 @@ def generate_ctgan_modal(
     })
 
     try:
+        resolved_model_id = model_id or job.get("model_id")
         result = generate_synthetic_dataset(
             backend=backend,
             dataset_id=dataset_id,
+            model_id=resolved_model_id,
             n_samples=n_samples,
             job_id=job_id,
             source="modal",

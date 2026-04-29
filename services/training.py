@@ -267,9 +267,8 @@ def _run_local(job_id: str):
                 "job_id": job_id,
                 "source": "local",
                 "user_id": job.get("user_id"),
-                "config": ctgan.get_config(),
-                "sdmetrics": sdmetrics_result,
             },
+            config=ctgan.get_config(),
         )
         local_model_path.unlink(missing_ok=True)
 
@@ -295,7 +294,7 @@ def _run_local(job_id: str):
 
         backend.update_training_job(job_id, {
             "status": "completed",
-            "model_id": dataset_id,
+            "model_id": model_record["id"],
             "model_path": model_record["object_key"],
             "training_time_seconds": float(ctgan.training_time_seconds),
             "epochs_trained": epochs_trained,

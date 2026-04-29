@@ -18,7 +18,13 @@ def find_generation_job(job_or_dataset_id: str) -> dict | None:
     return get_storage_backend().get_generation_job(job_or_dataset_id)
 
 
-def create_generation_job(dataset_id: str, n_samples: int, user_id: str | None = None) -> dict:
+def create_generation_job(
+    dataset_id: str,
+    n_samples: int,
+    user_id: str | None = None,
+    model_id: str | None = None,
+    run_sdmetrics: bool = True,
+) -> dict:
     if n_samples <= 0:
         raise ValueError("n_samples must be greater than 0.")
 
@@ -26,8 +32,10 @@ def create_generation_job(dataset_id: str, n_samples: int, user_id: str | None =
         "job_id": str(uuid.uuid4()),
         "dataset_id": dataset_id,
         "user_id": user_id,
+        "model_id": model_id,
         "status": "queued",
         "n_samples": int(n_samples),
+        "run_sdmetrics": bool(run_sdmetrics),
         "synthetic_id": None,
         "synthetic_path": None,
         "preview": [],
@@ -43,9 +51,6 @@ def create_generation_job(dataset_id: str, n_samples: int, user_id: str | None =
 
 
 def run_generation_job(job_id: str):
-    """
-    Called by FastAPI's BackgroundTasks. Chooses Modal or local execution.
-    """
     if get_settings().use_modal:
         _dispatch_to_modal(job_id)
     else:
@@ -69,6 +74,7 @@ def _dispatch_to_modal(job_id: str):
 
         dataset_id = job["dataset_id"]
         n_samples = int(job["n_samples"])
+        model_id = job.get("model_id")
 
         logger.info(
             "Dispatching generation job %s (dataset=%s, n_samples=%d) to Modal",
@@ -86,6 +92,8 @@ def _dispatch_to_modal(job_id: str):
             dataset_id=dataset_id,
             job_id=job_id,
             n_samples=n_samples,
+            model_id=model_id,
+            run_sdmetrics=bool(job.get("run_sdmetrics", True)),
         )
 
         backend.update_generation_job(job_id, {
@@ -122,6 +130,7 @@ def _run_local(job_id: str):
         result = generate_synthetic_dataset(
             backend=backend,
             dataset_id=job["dataset_id"],
+            model_id=job.get("model_id"),
             n_samples=int(job["n_samples"]),
             job_id=job_id,
             source="local",
@@ -157,6 +166,7 @@ def generate_synthetic_dataset(
     *,
     backend,
     dataset_id: str,
+    model_id: str | None,
     n_samples: int,
     job_id: str | None,
     source: str
@@ -164,11 +174,16 @@ def generate_synthetic_dataset(
     from generators.ctgan import CTGANWrapper
 
     start = perf_counter()
-    model_record = backend.get_model(dataset_id)
-    if not model_record:
-        raise FileNotFoundError(f"Model for dataset '{dataset_id}' not found.")
-
-    temp_file, _ = backend.download_model_to_tempfile(dataset_id)
+    if model_id:
+        model_record = backend.get_model_by_id(model_id)
+        if not model_record:
+            raise FileNotFoundError(f"Model '{model_id}' not found.")
+        temp_file, _ = backend.download_model_to_tempfile_by_id(model_id)
+    else:
+        model_record = backend.get_model(dataset_id)
+        if not model_record:
+            raise FileNotFoundError(f"Model for dataset '{dataset_id}' not found.")
+        temp_file, _ = backend.download_model_to_tempfile(dataset_id)
     try:
         ctgan = CTGANWrapper.load(temp_file.name)
     finally:
@@ -196,6 +211,7 @@ def generate_synthetic_dataset(
         dataset_type="synthetic",
         extra_metadata={
             "source_dataset_id": dataset_id,
+            "source_model_id": model_record.get("id"),
             "generation_job_id": job_id,
             "source": source,
         },
@@ -216,8 +232,10 @@ def generation_status_payload(job: dict) -> dict:
     return {
         "job_id": job["job_id"],
         "dataset_id": job["dataset_id"],
+        "model_id": job.get("model_id"),
         "status": job["status"],
         "n_samples": job.get("n_samples"),
+        "run_sdmetrics": job.get("run_sdmetrics"),
         "synthetic_id": job.get("synthetic_id"),
         "synthetic_path": job.get("synthetic_path"),
         "preview": job.get("preview") or [],

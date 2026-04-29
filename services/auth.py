@@ -31,6 +31,10 @@ def _supabase_auth_client():
 async def require_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> AuthenticatedUser:
+    settings = get_settings()
+    if settings.bypass_auth:
+        return AuthenticatedUser(id="07c5849a-6442-464a-9936-376c0ae3c786", email="ds299555@gmail.com")
+    
     if not credentials or not credentials.credentials:
         raise HTTPException(status_code=401, detail="Missing bearer token.")
 

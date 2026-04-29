@@ -24,7 +24,7 @@ def _sdmetrics_report(real_df: pd.DataFrame, synthetic_df: pd.DataFrame, metadat
         from sdmetrics.reports.single_table import DiagnosticReport, QualityReport
         from sdmetrics.single_table import BinaryAdaBoostClassifier
     except ImportError:
-        return {"error": "sdmetrics not installed – pip install sdmetrics"}
+        return {"error": "sdmetrics not installed - pip install sdmetrics"}
 
     results: dict = {}
     meta_cols = list(metadata.get("columns", {}).keys())
@@ -93,17 +93,43 @@ def _sdmetrics_report(real_df: pd.DataFrame, synthetic_df: pd.DataFrame, metadat
     try:
         target_col = metadata.get("_target_col")
         if target_col and target_col in real_df.columns:
-            real_encoded = real_df.apply(
-                lambda s: s.astype('category').cat.codes if s.dtype == object else s
+            from sklearn.metrics import f1_score
+
+            ml_real = real_df.dropna(subset=[target_col]).copy()
+            ml_synth = synthetic_df.dropna(subset=[target_col]).copy()
+            common_cols = [col for col in ml_real.columns if col in ml_synth.columns]
+            ml_real = ml_real[common_cols]
+            ml_synth = ml_synth[common_cols]
+
+            real_labels = pd.Series(ml_real[target_col]).dropna().unique()
+            synth_labels = pd.Series(ml_synth[target_col]).dropna().unique()
+            common_labels = sorted(
+                set(real_labels).intersection(set(synth_labels)),
+                key=lambda value: str(value),
             )
-            synth_encoded = synthetic_df.apply(
-                lambda s: s.astype('category').cat.codes if s.dtype == object else s
-            )
+            if len(common_labels) < 2:
+                raise ValueError(
+                    f"Target '{target_col}' needs at least two shared labels for ML efficacy."
+                )
+
+            pos_label = common_labels[-1]
+            ml_real[target_col] = (ml_real[target_col] == pos_label).astype(int)
+            ml_synth[target_col] = (ml_synth[target_col] == pos_label).astype(int)
+
+            def binary_f1(test_target, predictions):
+                return f1_score(
+                    test_target,
+                    predictions,
+                    pos_label=1,
+                    zero_division=0,
+                )
+
             ml_result = BinaryAdaBoostClassifier.compute(
-                test_data=real_encoded,
-                train_data=synth_encoded,
+                test_data=ml_real,
+                train_data=ml_synth,
                 target=target_col,
                 metadata=metadata,
+                scorer=binary_f1,
             )
             results["ml_efficacy"] = {
                 "train_on_synthetic_test_on_real_f1": round(float(ml_result), 4)

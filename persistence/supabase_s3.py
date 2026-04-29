@@ -71,7 +71,16 @@ class PersistenceBackend:
     def list_models(self, user_id: str) -> list[dict]:
         raise NotImplementedError
 
+    def list_training_jobs(self, user_id: str) -> list[dict]:
+        raise NotImplementedError
+
     def download_model_to_tempfile(self, dataset_id: str) -> tuple[NamedTemporaryFile, dict]:
+        raise NotImplementedError
+
+    def get_model_by_id(self, model_id: str) -> dict | None:
+        raise NotImplementedError
+
+    def download_model_to_tempfile_by_id(self, model_id: str) -> tuple[NamedTemporaryFile, dict]:
         raise NotImplementedError
 
     def get_health_status(self) -> dict:
@@ -256,11 +265,15 @@ class SupabaseS3Backend(PersistenceBackend):
             raise self._format_storage_error("Supabase", exc) from exc
 
         return [self._dataset_summary(dict(record)) for record in response.data or []]
-    
-    def list_models(self, user_id: str) -> list[dict]:
+
+    def list_training_jobs(self, user_id: str) -> list[dict]:
+        """
+        Returns full training-job history with SDMetrics + derived fields.
+        Uses `training_job_summary` view, which promotes the commonly-used metrics.
+        """
         try:
             response = (
-                self.supabase.table(self.models_table)
+                self.supabase.table("training_job_summary")
                 .select("*")
                 .eq("user_id", user_id)
                 .order("created_at", desc=True)
@@ -269,7 +282,44 @@ class SupabaseS3Backend(PersistenceBackend):
         except Exception as exc:
             raise self._format_storage_error("Supabase", exc) from exc
 
-        return [self._model_summary(dict(record)) for record in response.data or []]
+        return [dict(r) for r in response.data or []]
+    
+    def _list_models_for_dataset(self, user_id: str, dataset_id: str) -> list[dict]:
+        """
+        Returns "table-ready" model rows (artifact + metrics) for a single dataset.
+        Uses the `trained_model_summary` view, which joins `trained_models` with
+        `training_jobs`.
+        """
+        try:
+            response = (
+                self.supabase.table("trained_model_summary")
+                .select("*")
+                .eq("user_id", user_id)
+                .eq("dataset_id", dataset_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+
+        return [dict(r) for r in response.data or []]
+
+    def list_models(self, user_id: str) -> list[dict]:
+        """
+        List all trained model artifacts for a user (across datasets).
+        """
+        try:
+            response = (
+                self.supabase.table("trained_model_summary")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+
+        return [dict(r) for r in response.data or []]
 
     def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
         try:
@@ -293,12 +343,25 @@ class SupabaseS3Backend(PersistenceBackend):
             except Exception:
                 pass
 
-        model = self.get_model(dataset_id)
-        if model and model.get("object_key"):
-            try:
-                self.s3.delete_object(Bucket=self.model_bucket, Key=model["object_key"])
-            except Exception:
-                pass
+        # Delete *all* trained model artifacts for this dataset (not just the latest one).
+        try:
+            models_resp = (
+                self.supabase.table(self.models_table)
+                .select("object_key")
+                .eq("dataset_id", dataset_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            for rec in models_resp.data or []:
+                object_key = rec.get("object_key")
+                if not object_key:
+                    continue
+                try:
+                    self.s3.delete_object(Bucket=self.model_bucket, Key=object_key)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         try:
             self.supabase.table(self.datasets_table).delete().eq("id", dataset_id).eq("user_id", user_id).execute()
@@ -308,6 +371,7 @@ class SupabaseS3Backend(PersistenceBackend):
 
     def _dataset_summary(self, record: dict) -> dict:
         dataset_id = record["id"]
+        record_user_id = record.get("user_id", "")
         return {
             "id": dataset_id,
             "filename": record.get("filename"),
@@ -319,23 +383,10 @@ class SupabaseS3Backend(PersistenceBackend):
             "schema": record.get("schema"),
             "created_at": record.get("created_at"),
             "has_model": self.get_model(dataset_id) is not None,
-            "models": self.list_models(record.get("user_id", "")),
+            "models": self._list_models_for_dataset(record_user_id, dataset_id),
             "latest_training_job": self.get_training_job(dataset_id),
             "latest_generation_job": self.get_generation_job(dataset_id),
         }
-
-    def _model_summary(self, record: dict) -> dict:
-        model_id = record["id"]
-        return {
-            "id": model_id,
-            "dataset_id": record.get("dataset_id"),
-            "object_key": record.get("object_key"),
-            "metadata": record.get("metadata"),
-            "config": record.get("config"),
-            "sdmetrics_quality_score": record.get("sdmetrics_quality_score"),
-            "sdmetrics_diagnostic_score": record.get("sdmetrics_diagnostic_score"),
-            "created_at": record.get("created_at"),
-        } 
 
     def save_training_job(self, job: dict) -> dict:
         try:
@@ -436,11 +487,14 @@ class SupabaseS3Backend(PersistenceBackend):
             "id": str(uuid4()),
             "dataset_id": dataset_id,
             "object_key": object_key,
+            "training_job_id": (metadata or {}).get("job_id"),
             "metadata": metadata or {},
             "config": config or {},
             "user_id": (metadata or {}).get("user_id"),
-            "created_at": metadata.get("trained_at") if metadata else None,
         }
+        trained_at = (metadata or {}).get("trained_at")
+        if trained_at:
+            record["created_at"] = trained_at
         try:
             self.supabase.table(self.models_table).upsert(record).execute()
         except Exception as exc:
@@ -453,6 +507,7 @@ class SupabaseS3Backend(PersistenceBackend):
                 self.supabase.table(self.models_table)
                 .select("*")
                 .eq("dataset_id", dataset_id)
+                .order("created_at", desc=True)
                 .limit(1)
                 .execute()
             )
@@ -461,6 +516,31 @@ class SupabaseS3Backend(PersistenceBackend):
         if not response.data:
             return None
         return dict(response.data[0])
+
+    def get_model_by_id(self, model_id: str) -> dict | None:
+        try:
+            response = (
+                self.supabase.table(self.models_table)
+                .select("*")
+                .eq("id", model_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            raise self._format_storage_error("Supabase", exc) from exc
+        if not response.data:
+            return None
+        return dict(response.data[0])
+
+    def download_model_to_tempfile_by_id(self, model_id: str) -> tuple[NamedTemporaryFile, dict]:
+        record = self.get_model_by_id(model_id)
+        if not record:
+            raise FileNotFoundError(f"Model '{model_id}' not found.")
+        temp_file = NamedTemporaryFile(delete=False, suffix=".pkl")
+        temp_file.write(self._download_bytes(self.model_bucket, record["object_key"]))
+        temp_file.flush()
+        temp_file.close()
+        return temp_file, record
 
     def download_model_to_tempfile(self, dataset_id: str) -> tuple[NamedTemporaryFile, dict]:
         record = self.get_model(dataset_id)

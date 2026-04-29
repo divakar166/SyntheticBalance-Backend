@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+import math
+import numpy as np
 
 from settings import get_settings
 from services.auth import AuthenticatedUser, ensure_user_owns_record, require_user
@@ -47,8 +49,29 @@ async def lifespan(app):
         logger.exception("Storage startup check failed")
     yield
 
+class NaNSafeJSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        import json
+        
+        def sanitize(obj):
+            if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+                return None
+            if isinstance(obj, np.floating):
+                val = float(obj)
+                return None if not math.isfinite(val) else val
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.ndarray):
+                return sanitize(obj.tolist())
+            if isinstance(obj, dict):
+                return {key: sanitize(value) for key, value in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [sanitize(value) for value in obj]
+            return obj
+        
+        return json.dumps(sanitize(content), allow_nan=False).encode("utf-8")
 
-app = FastAPI(title="Synthetic Data Generator", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Synthetic Data Generator", version="0.1.0", lifespan=lifespan, default_response_class=NaNSafeJSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
@@ -273,6 +296,7 @@ async def generate_synthetic(
     dataset_id: str,
     n_samples: int = 5000,
     run_sdmetrics: bool = True,
+    model_id: str | None = None,
     current_user: AuthenticatedUser = Depends(require_user),
 ):
     if n_samples <= 0:
@@ -293,11 +317,39 @@ async def generate_synthetic(
     except Exception as exc:
         raise storage_operation_error(exc) from exc
 
-    if not model_record:
-        raise HTTPException(status_code=404, detail=f"Model for dataset '{dataset_id}' not found.")
+    # If the caller specified a model_id, validate it and use that model.
+    if model_id:
+        try:
+            model_record = backend.get_model_by_id(model_id)
+        except Exception as exc:
+            raise storage_operation_error(exc) from exc
+
+        if not model_record:
+            raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
+        if str(model_record.get("dataset_id")) != str(dataset_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{model_id}' does not belong to dataset '{dataset_id}'.",
+            )
+
+        ensure_user_owns_record(model_record, current_user, f"Model '{model_id}'")
+    else:
+        # Default behavior: use latest model for the dataset (and persist it into
+        # generation_jobs.model_id for analytics).
+        if not model_record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model for dataset '{dataset_id}' not found.",
+            )
 
     try:
-        job = create_generation_job(dataset_id, n_samples, current_user.id)
+        job = create_generation_job(
+            dataset_id,
+            n_samples,
+            current_user.id,
+            model_id=model_record.get("id"),
+            run_sdmetrics=run_sdmetrics,
+        )
     except Exception as exc:
         raise storage_operation_error(exc) from exc
 
@@ -305,6 +357,7 @@ async def generate_synthetic(
     return {
         "job_id": job["job_id"],
         "dataset_id": dataset_id,
+        "model_id": job.get("model_id"),
         "status": job["status"],
         "n_samples": job["n_samples"],
         "run_sdmetrics": run_sdmetrics,
@@ -345,6 +398,15 @@ async def list_user_models(current_user: AuthenticatedUser = Depends(require_use
     return {"models": models}
 
 
+@app.get("/api/training-jobs")
+async def list_user_training_jobs(current_user: AuthenticatedUser = Depends(require_user)):
+    try:
+        training_jobs = get_storage_backend().list_training_jobs(current_user.id)
+    except Exception as exc:
+        raise storage_operation_error(exc) from exc
+    return {"training_jobs": training_jobs}
+
+
 @app.delete("/api/datasets/{dataset_id}")
 async def delete_user_dataset(
     dataset_id: str,
@@ -373,7 +435,6 @@ async def evaluate(
     request: EvaluationRequest,
     current_user: AuthenticatedUser = Depends(require_user),
 ):
-    from downstream.classifier import ClassifierPipeline
     from evaluation.privacy import PrivacyMetrics
     from evaluation.quality import QualityMetrics
 
@@ -404,12 +465,12 @@ async def evaluate(
         "dp_estimate": PrivacyMetrics.dp_budget_estimate(real_df, syn_df),
     }
 
-    classifier = ClassifierPipeline(
-        real_dataset["schema"],
-        target_col=real_dataset["schema"]["target"]["name"],
-    )
-    _, real_metrics = classifier.train_real_only(real_df)
-    _, mixed_metrics = classifier.train_synthetic_mixed(real_df, syn_df, synthetic_weight=0.5)
+    # classifier = ClassifierPipeline(
+    #     real_dataset["schema"],
+    #     target_col=real_dataset["schema"]["target"]["name"],
+    # )
+    # _, real_metrics = classifier.train_real_only(real_df)
+    # _, mixed_metrics = classifier.train_synthetic_mixed(real_df, syn_df, synthetic_weight=0.5)
 
     # SDMetrics
     sdmetrics_result: dict = {}
@@ -429,15 +490,6 @@ async def evaluate(
         "quality": quality,
         "privacy": privacy,
         "sdmetrics": sdmetrics_result,
-        "real_only_metrics": real_metrics,
-        "synthetic_mixed_metrics": mixed_metrics,
-        "impact": {
-            "auc_lift": (mixed_metrics["auc"] - real_metrics["auc"]) / real_metrics["auc"],
-            "recall_lift": (
-                (mixed_metrics["recall_minority"] - real_metrics["recall_minority"])
-                / real_metrics["recall_minority"]
-            ),
-        },
     }
 
 

@@ -9,7 +9,10 @@ from fastapi import BackgroundTasks, HTTPException
 from starlette.datastructures import Headers, UploadFile
 
 import services.state as app_state
+from evaluation.privacy import PrivacyMetrics
+from evaluation.quality import QualityMetrics
 from main import (
+    NaNSafeJSONResponse,
     TrainRequest,
     generate_synthetic,
     get_generate_status,
@@ -113,8 +116,15 @@ class StorageBackendStub:
     def get_model(self, dataset_id: str) -> dict | None:
         return self.models.get(dataset_id)
 
+    def get_model_by_id(self, model_id: str) -> dict | None:
+        # In this test stub, model_id == dataset_id (see save_model()).
+        return self.models.get(model_id)
+
     def list_models(self, user_id: str) -> list[dict]:
         return [record for record in self.models.values() if record.get("user_id") == user_id]
+
+    def list_training_jobs(self, user_id: str) -> list[dict]:
+        return [job for job in self.training_jobs.values() if job.get("user_id") == user_id]
 
 
 def csv_bytes(df: pd.DataFrame) -> bytes:
@@ -317,6 +327,46 @@ class BackendApiTests(unittest.TestCase):
         updated = self.backend.generation_jobs[job["job_id"]]
         self.assertEqual(updated["status"], "failed")
         self.assertEqual(updated["error"], "boom")
+
+    def test_evaluation_metrics_return_finite_values_with_missing_and_constant_columns(self):
+        real_df = pd.DataFrame(
+            {
+                "amount": [10.0, 10.0, None, 10.0],
+                "score": [1.0, 2.0, 3.0, 4.0],
+                "merchant": ["A", "B", "A", None],
+                "fraud": ["No", "No", "Yes", "Yes"],
+            }
+        )
+        syn_df = pd.DataFrame(
+            {
+                "amount": [10.0, None, 10.0, 10.0],
+                "score": [1.1, 2.1, None, 3.8],
+                "merchant": ["A", "C", None, "B"],
+                "fraud": ["No", "Yes", "Yes", "No"],
+            }
+        )
+
+        quality = {
+            "wasserstein": QualityMetrics.wasserstein_distance(real_df, syn_df),
+            "correlation": QualityMetrics.correlation_difference(real_df, syn_df),
+            "pca": QualityMetrics.pca_variance_retained(real_df, syn_df),
+        }
+        privacy = {
+            "k": PrivacyMetrics.k_anonymity(real_df, syn_df),
+            "mia": PrivacyMetrics.membership_inference_attack(real_df, syn_df),
+            "dp": PrivacyMetrics.dp_budget_estimate(real_df, syn_df),
+        }
+
+        self.assertGreaterEqual(quality["wasserstein"], 0.0)
+        self.assertGreaterEqual(quality["pca"], 0.0)
+        self.assertGreaterEqual(privacy["k"], 0)
+        self.assertGreaterEqual(privacy["mia"], 0.0)
+        self.assertLessEqual(privacy["mia"], 1.0)
+        self.assertGreaterEqual(privacy["dp"]["epsilon"], 0.0)
+
+        response = NaNSafeJSONResponse({"value": float("nan"), "nested": {"inf": float("inf")}})
+        self.assertNotIn("NaN", response.body.decode("utf-8"))
+        self.assertNotIn("Infinity", response.body.decode("utf-8"))
 
 
 if __name__ == "__main__":

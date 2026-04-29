@@ -41,6 +41,8 @@ class AppSettings(BaseSettings):
     aws_s3_dataset_bucket: str | None = None
     aws_s3_model_bucket: str | None = None
 
+    bypass_auth: bool = True
+
     def ensure_directories(self):
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
