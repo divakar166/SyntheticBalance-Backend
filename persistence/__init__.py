@@ -1,5 +1,3 @@
-from .backends.base import PersistenceBackend
-from .backends.memory import InMemoryBackend
-from .backends.supabase_s3 import SupabaseS3Backend
+from .supabase_s3 import PersistenceBackend, SupabaseS3Backend
 
-__all__ = ["PersistenceBackend", "InMemoryBackend", "SupabaseS3Backend"]
+__all__ = ["PersistenceBackend", "SupabaseS3Backend"]

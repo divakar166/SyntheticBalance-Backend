@@ -17,12 +17,104 @@ from main import (
     train_ctgan,
     upload_csv,
 )
-from persistence import InMemoryBackend
 from services.auth import AuthenticatedUser
 from services.generation import create_generation_job
 from services.generation import _run_local as run_generation_local
 
 TEST_USER = AuthenticatedUser(id="user-1", email="user@example.com")
+
+
+class StorageBackendStub:
+    def __init__(self):
+        self.datasets = {}
+        self.training_jobs = {}
+        self.models = {}
+        self.generation_jobs = {}
+
+    def save_dataset(self, dataset_id: str, df: pd.DataFrame, schema: dict, metadata: dict) -> dict:
+        record = {
+            "id": dataset_id,
+            "df": df,
+            "schema": schema,
+            "target": metadata.get("target"),
+            "metadata": metadata,
+            "user_id": metadata.get("user_id"),
+            "filename": metadata.get("filename"),
+            "dataset_type": metadata.get("dataset_type", "real"),
+            "object_key": f"{metadata.get('dataset_type', 'real')}/{dataset_id}.csv",
+            "n_rows": int(len(df)),
+            "n_features": int(len(schema.get("features", {}))),
+            "class_dist": schema.get("target", {}).get("class_distribution", {}),
+            "created_at": metadata.get("upload_time"),
+        }
+        self.datasets[dataset_id] = record
+        return record
+
+    def get_dataset(self, dataset_id: str) -> dict | None:
+        return self.datasets.get(dataset_id)
+
+    def list_datasets(self, user_id: str) -> list[dict]:
+        return [record for record in self.datasets.values() if record.get("user_id") == user_id]
+
+    def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
+        record = self.datasets.get(dataset_id)
+        if not record or record.get("user_id") != user_id:
+            return False
+        self.datasets.pop(dataset_id, None)
+        self.models.pop(dataset_id, None)
+        return True
+
+    def save_training_job(self, job: dict) -> dict:
+        self.training_jobs[job["job_id"]] = dict(job)
+        return self.training_jobs[job["job_id"]]
+
+    def update_training_job(self, job_id: str, values: dict) -> dict:
+        self.training_jobs[job_id].update(values)
+        return self.training_jobs[job_id]
+
+    def get_training_job(self, job_or_dataset_id: str) -> dict | None:
+        direct = self.training_jobs.get(job_or_dataset_id)
+        if direct:
+            return direct
+        for job in reversed(list(self.training_jobs.values())):
+            if job.get("dataset_id") == job_or_dataset_id:
+                return job
+        return None
+
+    def save_generation_job(self, job: dict) -> dict:
+        self.generation_jobs[job["job_id"]] = dict(job)
+        return self.generation_jobs[job["job_id"]]
+
+    def update_generation_job(self, job_id: str, values: dict) -> dict:
+        self.generation_jobs[job_id].update(values)
+        return self.generation_jobs[job_id]
+
+    def get_generation_job(self, job_or_dataset_id: str) -> dict | None:
+        direct = self.generation_jobs.get(job_or_dataset_id)
+        if direct:
+            return direct
+        for job in reversed(list(self.generation_jobs.values())):
+            if job.get("dataset_id") == job_or_dataset_id:
+                return job
+        return None
+
+    def save_model(self, dataset_id: str, local_model_path, metadata: dict | None = None, config=None) -> dict:
+        record = {
+            "id": dataset_id,
+            "dataset_id": dataset_id,
+            "object_key": f"ctgan/{dataset_id}.pkl",
+            "metadata": metadata or {},
+            "config": config or {},
+            "user_id": (metadata or {}).get("user_id"),
+        }
+        self.models[dataset_id] = record
+        return record
+
+    def get_model(self, dataset_id: str) -> dict | None:
+        return self.models.get(dataset_id)
+
+    def list_models(self, user_id: str) -> list[dict]:
+        return [record for record in self.models.values() if record.get("user_id") == user_id]
 
 
 def csv_bytes(df: pd.DataFrame) -> bytes:
@@ -31,17 +123,9 @@ def csv_bytes(df: pd.DataFrame) -> bytes:
 
 class BackendApiTests(unittest.TestCase):
     def setUp(self):
-        app_state.datasets.clear()
-        app_state.models.clear()
-        app_state.training_jobs.clear()
-        app_state.generation_jobs.clear()
-        app_state._storage_backend = InMemoryBackend(
-            app_state.datasets,
-            app_state.training_jobs,
-            app_state.models,
-            app_state.generation_jobs,
-        )
-        app_state.datasets["dataset-1"] = {
+        self.backend = StorageBackendStub()
+        app_state._storage_backend = self.backend
+        self.backend.datasets["dataset-1"] = {
             "id": "dataset-1",
             "df": pd.DataFrame(
                 {
@@ -65,7 +149,7 @@ class BackendApiTests(unittest.TestCase):
                 "user_id": TEST_USER.id,
             },
         }
-        app_state.models["dataset-1"] = {
+        self.backend.models["dataset-1"] = {
             "id": "dataset-1",
             "dataset_id": "dataset-1",
             "object_key": "ctgan/dataset-1.pkl",
@@ -74,10 +158,6 @@ class BackendApiTests(unittest.TestCase):
         }
 
     def tearDown(self):
-        app_state.datasets.clear()
-        app_state.models.clear()
-        app_state.training_jobs.clear()
-        app_state.generation_jobs.clear()
         app_state._storage_backend = None
 
     def upload_file(self, filename: str, content: bytes, content_type: str = "text/csv"):
@@ -105,7 +185,7 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(response["n_rows"], 4)
         self.assertEqual(response["n_features"], 2)
         self.assertEqual(response["class_dist"], {"0": 3, "1": 1})
-        self.assertIn(response["dataset_id"], app_state.datasets)
+        self.assertIn(response["dataset_id"], self.backend.datasets)
 
     def test_upload_rejects_missing_target_column(self):
         response = self.upload_file("transactions.csv", csv_bytes(pd.DataFrame({"amount": [1, 2]})))
@@ -127,7 +207,7 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(response["status"], "queued")
         self.assertEqual(response["dataset_id"], "dataset-1")
         self.assertEqual(len(background_tasks.tasks), 1)
-        self.assertEqual(app_state.training_jobs[response["job_id"]]["total_epochs"], 3)
+        self.assertEqual(self.backend.training_jobs[response["job_id"]]["total_epochs"], 3)
 
     def test_train_ctgan_returns_404_for_missing_dataset(self):
         with self.assertRaises(HTTPException) as exc:
@@ -156,7 +236,7 @@ class BackendApiTests(unittest.TestCase):
                 current_user=TEST_USER,
             )
         )
-        app_state.training_jobs[first["job_id"]]["status"] = "completed"
+        self.backend.training_jobs[first["job_id"]]["status"] = "completed"
 
         response = asyncio.run(get_train_status("dataset-1", current_user=TEST_USER))
 
@@ -179,10 +259,10 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(response["dataset_id"], "dataset-1")
         self.assertEqual(response["n_samples"], 25)
         self.assertEqual(len(background_tasks.tasks), 1)
-        self.assertIn(response["job_id"], app_state.generation_jobs)
+        self.assertIn(response["job_id"], self.backend.generation_jobs)
 
     def test_generate_synthetic_requires_trained_model(self):
-        app_state.models.clear()
+        self.backend.models.clear()
 
         with self.assertRaises(HTTPException) as exc:
             asyncio.run(
@@ -200,7 +280,7 @@ class BackendApiTests(unittest.TestCase):
     def test_get_generate_status_returns_latest_job_for_dataset(self):
         first = create_generation_job("dataset-1", 10, TEST_USER.id)
         second = create_generation_job("dataset-1", 20, TEST_USER.id)
-        app_state.generation_jobs[first["job_id"]]["status"] = "completed"
+        self.backend.generation_jobs[first["job_id"]]["status"] = "completed"
 
         response = asyncio.run(get_generate_status("dataset-1", current_user=TEST_USER))
 
@@ -222,7 +302,7 @@ class BackendApiTests(unittest.TestCase):
         ):
             run_generation_local(job["job_id"])
 
-        updated = app_state.generation_jobs[job["job_id"]]
+        updated = self.backend.generation_jobs[job["job_id"]]
         self.assertEqual(updated["status"], "completed")
         self.assertEqual(updated["synthetic_id"], "synthetic-1")
         self.assertEqual(updated["synthetic_path"], "synthetic/synthetic-1.csv")
@@ -234,7 +314,7 @@ class BackendApiTests(unittest.TestCase):
         with patch("services.generation.generate_synthetic_dataset", side_effect=RuntimeError("boom")):
             run_generation_local(job["job_id"])
 
-        updated = app_state.generation_jobs[job["job_id"]]
+        updated = self.backend.generation_jobs[job["job_id"]]
         self.assertEqual(updated["status"], "failed")
         self.assertEqual(updated["error"], "boom")
 

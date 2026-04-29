@@ -1,12 +1,11 @@
 import logging
-import os
-from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from settings import get_settings
 from services.auth import AuthenticatedUser, ensure_user_owns_record, require_user
 from services.state import get_storage_backend
 from services.generation import (
@@ -30,12 +29,10 @@ from services.uploads import (
     validate_target_column,
 )
 
-load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-PORT = int(os.getenv("PORT", 8000))
+PORT = get_settings().port
 
 @asynccontextmanager
 async def lifespan(app):

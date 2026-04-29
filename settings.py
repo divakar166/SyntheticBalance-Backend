@@ -22,6 +22,7 @@ class AppSettings(BaseSettings):
     classifier_test_size: float = 0.2
     random_seed: int = 42
 
+    port: int = 8000
     use_modal: bool = True
 
     supabase_url: str | None = None

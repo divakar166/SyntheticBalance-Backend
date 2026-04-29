@@ -1,12 +1,10 @@
 # Backend Setup
 
-This backend supports three storage modes:
+This backend uses one persistent storage mode:
 
-- `InMemoryBackend`: local-only development, not suitable for Modal.
-- `SupabaseMinioBackend`: Supabase metadata plus MinIO object storage.
 - `SupabaseS3Backend`: Supabase metadata plus AWS S3 object storage.
 
-For Modal-compatible training and generation, use Supabase + AWS S3.
+Supabase + AWS S3 is required so the FastAPI app and Modal workers share the same datasets, jobs, and model artifacts.
 
 ## Environment Variables
 
@@ -72,7 +70,5 @@ When the job completes, the response includes `synthetic_id`, which can be passe
 
 ## Notes
 
-- The backend auto-selects S3 when the AWS variables above are present.
-- If S3 is not configured but MinIO is, it will use the MinIO backend.
-- If neither shared storage backend is configured, it falls back to in-memory storage.
-- In-memory storage will not work with Modal workers because the data is not shared across processes.
+- The backend always initializes the Supabase S3 backend.
+- Missing Supabase or S3 configuration will fail storage operations with a clear configuration error.

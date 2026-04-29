@@ -17,9 +17,7 @@ image = (
         "scikit-learn==1.8.0",
         "supabase==2.28.3",
         "boto3==1.42.95",
-        "minio==7.2.20",
         "pydantic-settings==2.14.0",
-        "python-dotenv==1.2.2",
         "sdmetrics==0.25.0",
     )
     .add_local_python_source("generators")
@@ -38,24 +36,12 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_backend(env: dict):
-    has_supabase = bool(env.get("SUPABASE_URL") and env.get("SUPABASE_SERVICE_ROLE_KEY"))
-    has_s3 = bool(
-        env.get("AWS_REGION")
-        and env.get("AWS_ACCESS_KEY_ID")
-        and env.get("AWS_SECRET_ACCESS_KEY")
-        and env.get("AWS_S3_DATASET_BUCKET")
-        and env.get("AWS_S3_MODEL_BUCKET")
-    )
+def _get_backend(_env: dict):
+    from persistence import SupabaseS3Backend
 
-    if has_supabase and has_s3:
-        from persistence.backends.supabase_s3 import SupabaseS3Backend
-        return SupabaseS3Backend()
-    else:
-        raise RuntimeError(
-            "Modal runner requires a persistent backend (Supabase + S3). "
-            "InMemoryBackend is not supported for remote training."
-        )
+    backend = SupabaseS3Backend()
+    backend._require_config()
+    return backend
 
 
 @app.function(

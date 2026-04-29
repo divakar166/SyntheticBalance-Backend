@@ -12,8 +12,6 @@ from botocore.exceptions import ClientError
 from handlers.data_handler import normalize_dataframe
 from settings import get_settings
 
-from .base import PersistenceBackend
-
 
 def _split_bucket_prefix(value: str) -> tuple[str, str]:
     if "/" in value:
@@ -22,6 +20,66 @@ def _split_bucket_prefix(value: str) -> tuple[str, str]:
     else:
         bucket, prefix = value, ""
     return bucket, prefix
+
+
+class PersistenceBackend:
+    def save_dataset(self, dataset_id: str, df: pd.DataFrame, schema: dict, metadata: dict) -> dict:
+        raise NotImplementedError
+
+    def get_dataset(self, dataset_id: str) -> dict | None:
+        raise NotImplementedError
+
+    def list_datasets(self, user_id: str) -> list[dict]:
+        raise NotImplementedError
+
+    def delete_dataset(self, dataset_id: str, user_id: str) -> bool:
+        raise NotImplementedError
+
+    def dataset_exists(self, dataset_id: str) -> bool:
+        return self.get_dataset(dataset_id) is not None
+
+    def save_training_job(self, job: dict) -> dict:
+        raise NotImplementedError
+
+    def update_training_job(self, job_id: str, values: dict) -> dict:
+        raise NotImplementedError
+
+    def get_training_job(self, job_or_dataset_id: str) -> dict | None:
+        raise NotImplementedError
+
+    def save_generation_job(self, job: dict) -> dict:
+        raise NotImplementedError
+
+    def update_generation_job(self, job_id: str, values: dict) -> dict:
+        raise NotImplementedError
+
+    def get_generation_job(self, job_or_dataset_id: str) -> dict | None:
+        raise NotImplementedError
+
+    def save_model(
+        self,
+        dataset_id: str,
+        local_model_path: str | Path,
+        metadata: dict | None = None,
+        config: dict | None = None,
+    ) -> dict:
+        raise NotImplementedError
+
+    def get_model(self, dataset_id: str) -> dict | None:
+        raise NotImplementedError
+
+    def list_models(self, user_id: str) -> list[dict]:
+        raise NotImplementedError
+
+    def download_model_to_tempfile(self, dataset_id: str) -> tuple[NamedTemporaryFile, dict]:
+        raise NotImplementedError
+
+    def get_health_status(self) -> dict:
+        return {
+            "backend": self.__class__.__name__,
+            "supabase": {"configured": False, "reachable": False},
+            "s3": {"configured": False, "reachable": False},
+        }
 
 
 class SupabaseS3Backend(PersistenceBackend):
@@ -261,6 +319,7 @@ class SupabaseS3Backend(PersistenceBackend):
             "schema": record.get("schema"),
             "created_at": record.get("created_at"),
             "has_model": self.get_model(dataset_id) is not None,
+            "models": self.list_models(record.get("user_id", "")),
             "latest_training_job": self.get_training_job(dataset_id),
             "latest_generation_job": self.get_generation_job(dataset_id),
         }
@@ -272,6 +331,7 @@ class SupabaseS3Backend(PersistenceBackend):
             "dataset_id": record.get("dataset_id"),
             "object_key": record.get("object_key"),
             "metadata": record.get("metadata"),
+            "config": record.get("config"),
             "sdmetrics_quality_score": record.get("sdmetrics_quality_score"),
             "sdmetrics_diagnostic_score": record.get("sdmetrics_diagnostic_score"),
             "created_at": record.get("created_at"),
